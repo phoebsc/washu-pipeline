@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .split_audio import parse_timestamp_file, split_audio
 from .transcribe import transcribe, format_as_text
-from .deid import load_classifier, DeidMapper, deid_transcript
+from .deid import load_classifier, DeidMapper, deid_session
 from .viewer import generate_html
 
 logging.basicConfig(
@@ -86,12 +86,13 @@ def process_tape(
     with open(subject_txt_path, "w", encoding="utf-8") as f:
         f.write(format_as_text(subject_transcript))
 
-    # Step 3: De-identify both together (shared mapper for consistent codes)
-    logger.info("Step 3: De-identifying transcripts...")
+    # Step 3: De-identify both together (cross-transcript propagation)
+    logger.info("Step 3: De-identifying transcripts (joint session)...")
     mapper = DeidMapper()
 
-    partner_deid = deid_transcript(partner_transcript, classifier, mapper)
-    subject_deid = deid_transcript(subject_transcript, classifier, mapper)
+    partner_deid, subject_deid = deid_session(
+        [partner_transcript, subject_transcript], classifier, mapper
+    )
 
     deid_dir = tape_output / "deid"
     deid_dir.mkdir(parents=True, exist_ok=True)

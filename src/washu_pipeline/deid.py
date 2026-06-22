@@ -266,56 +266,107 @@ def redact_text(text: str, entities: list[dict], mapper: DeidMapper) -> str:
     return redacted
 
 
-def deid_transcript(
-    transcript: dict,
+def deid_session(
+    transcripts: list[dict],
     classifier,
     mapper: DeidMapper,
-) -> dict:
-    """De-identify a single transcript using the privacy-filter model.
+) -> list[dict]:
+    """De-identify multiple transcripts as a single session.
+
+    Detects entities in each transcript independently, then propagates ALL
+    detected entities across ALL transcripts before redacting. This ensures
+    that the same person/date/address gets the same code whether it appears
+    in the partner interview, subject interview, or both.
 
     Args:
-        transcript: dict with "utterances" key (list of {speaker, text, start, end})
+        transcripts: list of dicts with "utterances" key
         classifier: loaded HuggingFace pipeline
-        mapper: shared DeidMapper for consistent codes across partner+subject
+        mapper: shared DeidMapper for consistent codes
 
     Returns:
-        De-identified transcript dict with coded entities.
+        List of de-identified transcript dicts (same order as input).
     """
-    utterances = transcript.get("utterances", [])
-    turns = [{"speaker": u["speaker"], "text": u["text"]} for u in utterances]
+    # Step 1: Run model pass on each transcript independently
+    all_turns: list[list[dict]] = []
+    all_detected: list[dict[int, list[dict]]] = []
 
-    logger.info(f"Running model pass on {len(turns)} turns...")
-    detected = run_model_pass(classifier, turns)
-    logger.info(f"Model found entities in {len(detected)} turns")
+    for transcript in transcripts:
+        utterances = transcript.get("utterances", [])
+        turns = [{"speaker": u["speaker"], "text": u["text"]} for u in utterances]
+        all_turns.append(turns)
 
-    logger.info("Propagating entities...")
-    propagated = propagate_entities(turns, detected)
-    logger.info(f"Propagated to {len(propagated)} turns")
+        logger.info(f"Running model pass on {len(turns)} turns...")
+        detected = run_model_pass(classifier, turns)
+        logger.info(f"Model found entities in {len(detected)} turns")
+        all_detected.append(detected)
 
-    deid_utterances = []
-    total_entities = 0
-    for i, utt in enumerate(utterances):
-        model_ents = detected.get(i, [])
-        prop_ents = propagated.get(i, [])
-        merged = merge_entity_lists(model_ents, prop_ents)
-        total_entities += len(merged)
+    # Step 2: Collect ALL detected PHI surfaces across all transcripts
+    phi_surfaces: dict[str, str] = {}
+    for detected in all_detected:
+        for ents in detected.values():
+            for e in ents:
+                word = e["word"].strip()
+                if word and len(word) > 1:
+                    phi_surfaces[word] = e["entity_group"]
 
-        redacted = redact_text(utt["text"], merged, mapper) if merged else utt["text"]
-        deid_utterances.append({
-            "speaker": utt["speaker"],
-            "text": redacted,
-            "start": utt.get("start"),
-            "end": utt.get("end"),
-            "entities": merged,
+    logger.info(f"Unique PHI entities across session: {len(phi_surfaces)}")
+
+    # Step 3: Propagate ALL entities across ALL transcripts
+    all_propagated: list[dict[int, list[dict]]] = []
+    for turns in all_turns:
+        propagated: dict[int, list[dict]] = {}
+        for turn_idx, turn in enumerate(turns):
+            text = turn["text"]
+            if not text:
+                continue
+            turn_ents = []
+            for word, entity_group in phi_surfaces.items():
+                pattern = re.compile(r"(?<!\w)" + re.escape(word) + r"(?!\w)")
+                for match in pattern.finditer(text):
+                    turn_ents.append({
+                        "entity_group": entity_group,
+                        "word": word,
+                        "start": match.start(),
+                        "end": match.end(),
+                        "score": 1.0,
+                    })
+            if turn_ents:
+                propagated[turn_idx] = turn_ents
+        all_propagated.append(propagated)
+
+    # Step 4: Merge and redact each transcript
+    results = []
+    for idx, transcript in enumerate(transcripts):
+        utterances = transcript.get("utterances", [])
+        detected = all_detected[idx]
+        propagated = all_propagated[idx]
+
+        deid_utterances = []
+        total_entities = 0
+        for i, utt in enumerate(utterances):
+            model_ents = detected.get(i, [])
+            prop_ents = propagated.get(i, [])
+            merged = merge_entity_lists(model_ents, prop_ents)
+            total_entities += len(merged)
+
+            redacted = redact_text(utt["text"], merged, mapper) if merged else utt["text"]
+            deid_utterances.append({
+                "speaker": utt["speaker"],
+                "text": redacted,
+                "start": utt.get("start"),
+                "end": utt.get("end"),
+                "entities": merged,
+            })
+
+        logger.info(f"Transcript {idx + 1}: {total_entities} entities redacted")
+
+        results.append({
+            "utterances": deid_utterances,
+            "text": "\n".join(f"{u['speaker']}: {u['text']}" for u in deid_utterances),
+            "metadata": transcript.get("metadata", {}),
         })
 
-    logger.info(f"Total entities redacted: {total_entities}")
-
-    return {
-        "utterances": deid_utterances,
-        "text": "\n".join(f"{u['speaker']}: {u['text']}" for u in deid_utterances),
-        "metadata": transcript.get("metadata", {}),
-    }
+    return results
 
 
 def cli():
@@ -342,19 +393,21 @@ def cli():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for input_path in args.input:
-        input_path = Path(input_path)
-        if not input_path.exists():
-            logger.warning(f"File not found: {input_path}, skipping")
+    input_paths = []
+    transcripts = []
+    for p in args.input:
+        p = Path(p)
+        if not p.exists():
+            logger.warning(f"File not found: {p}, skipping")
             continue
+        input_paths.append(p)
+        with open(p) as f:
+            transcripts.append(json.load(f))
 
-        logger.info(f"Processing: {input_path}")
-        with open(input_path) as f:
-            transcript = json.load(f)
+    results = deid_session(transcripts, classifier, mapper)
 
-        result = deid_transcript(transcript, classifier, mapper)
-
-        stem = input_path.stem.replace("diarized_transcript", "deid_transcript")
+    for input_path, result in zip(input_paths, results):
+        stem = input_path.stem.replace("_transcript", "_deid")
         json_path = output_dir / f"{stem}.json"
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)

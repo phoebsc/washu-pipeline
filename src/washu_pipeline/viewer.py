@@ -59,6 +59,7 @@ def _render_coded(text: str) -> str:
 
 def _build_transcript_section(
     title: str,
+    section_id: str,
     original_utterances: list[dict],
     deid_utterances: list[dict],
 ) -> str:
@@ -89,7 +90,7 @@ def _build_transcript_section(
         )
 
     return (
-        f'<h2>{escape(title)}</h2>\n'
+        f'<h2 id="{section_id}">{escape(title)}</h2>\n'
         f'<div class="columns">\n'
         f'  <div class="col">\n'
         f'    <div class="col-header">Original (PHI highlighted)</div>\n'
@@ -111,7 +112,7 @@ def _build_mapping_section(mapping: dict[str, str]) -> str:
     for code, original in sorted(mapping.items()):
         rows.append(f'<tr><td class="code">[{escape(code.upper())}]</td><td>{escape(original)}</td></tr>')
     return (
-        '<h2>Entity Mapping</h2>\n'
+        '<h2 id="mapping">Entity Mapping</h2>\n'
         '<table class="mapping">\n'
         '<tr><th>Code</th><th>Original</th></tr>\n'
         f'{"".join(rows)}\n'
@@ -129,6 +130,8 @@ def generate_html(tape_dir: Path) -> str:
     for role in ("partner", "subject"):
         orig_path = tape_dir / f"{role}_transcript.json"
         deid_path = deid_dir / f"{role}_deid.json"
+        if not deid_path.exists():
+            deid_path = deid_dir / f"{role}_transcript.json"
 
         if not orig_path.exists() or not deid_path.exists():
             logger.warning(f"Missing files for {role}, skipping")
@@ -139,10 +142,11 @@ def generate_html(tape_dir: Path) -> str:
         with open(deid_path) as f:
             deid_data = json.load(f)
 
-        title = f"Study Partner Interview" if role == "partner" else "Subject Interview"
+        title = "Study Partner Interview" if role == "partner" else "Subject Interview"
         sections.append(
             _build_transcript_section(
                 title,
+                role,
                 orig_data["utterances"],
                 deid_data["utterances"],
             )
@@ -208,6 +212,22 @@ _HTML_TEMPLATE = """\
     font-weight: 500;
     color: #555;
     margin-bottom: 0.5rem;
+  }}
+  nav {{
+    margin: 1rem 0;
+    padding: 0.75rem 1rem;
+    background: #f9f9f9;
+    border: 1px solid #eee;
+    border-radius: 4px;
+    font-size: 0.75rem;
+  }}
+  nav a {{
+    color: #2563eb;
+    text-decoration: none;
+    margin-right: 1.5rem;
+  }}
+  nav a:hover {{
+    text-decoration: underline;
   }}
   h2 {{
     font-size: 0.85rem;
@@ -287,6 +307,11 @@ _HTML_TEMPLATE = """\
 </head>
 <body>
 <h1>{tape_name}</h1>
+<nav>
+  <a href="#partner">Study Partner Interview</a>
+  <a href="#subject">Subject Interview</a>
+  <a href="#mapping">Entity Mapping</a>
+</nav>
 {sections}
 </body>
 </html>
