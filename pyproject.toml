@@ -1,0 +1,24 @@
+[project]
+name = "washu-pipeline"
+version = "0.1.0"
+description = "Transcription and de-identification pipeline for WashU CDR interview recordings"
+requires-python = ">=3.13"
+dependencies = [
+    "hf-transfer>=0.1.9",
+    "huggingface-hub>=1.13.0",
+    "librosa>=0.10.0",
+    "numpy>=2.0",
+    "pydub>=0.25.1",
+    "pyannote-audio>=3.3",
+    "python-dotenv>=1.2.2",
+    "pywhispercpp>=1.2.0",
+    "soundfile>=0.12.0",
+    "torch>=2.11.0",
+    "transformers>=5.7.0",
+]
+
+[project.scripts]
+washu-split = "washu_pipeline.split_audio:cli"
+washu-transcribe = "washu_pipeline.transcribe:cli"
+washu-deid = "washu_pipeline.deid:cli"
+washu-run = "washu_pipeline.run_pipeline:cli"
