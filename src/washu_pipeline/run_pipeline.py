@@ -21,6 +21,7 @@ from pathlib import Path
 from .split_audio import parse_timestamp_file, split_audio
 from .transcribe import transcribe, format_as_text
 from .deid import load_classifier, DeidMapper, deid_transcript
+from .viewer import generate_html
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +108,13 @@ def process_tape(
 
     with open(deid_dir / "deid_mapping.json", "w", encoding="utf-8") as f:
         json.dump(mapper.get_mapping(), f, indent=2, ensure_ascii=False)
+
+    # Step 4: Generate HTML viewer
+    logger.info("Step 4: Generating HTML viewer...")
+    html = generate_html(tape_output)
+    view_path = tape_output / "view.html"
+    view_path.write_text(html)
+    logger.info(f"HTML viewer: {view_path}")
 
     logger.info(f"Done: {tape_name} → {tape_output}")
     return tape_output

@@ -25,4 +25,5 @@ dependencies = [
 washu-split = "washu_pipeline.split_audio:cli"
 washu-transcribe = "washu_pipeline.transcribe:cli"
 washu-deid = "washu_pipeline.deid:cli"
+washu-view = "washu_pipeline.viewer:cli"
 washu-run = "washu_pipeline.run_pipeline:cli"
