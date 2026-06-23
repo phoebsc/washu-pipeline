@@ -14,9 +14,13 @@ Usage:
 """
 
 import argparse
+import gc
 import json
 import logging
+import time
 from pathlib import Path
+
+import torch
 
 from .split_audio import parse_timestamp_file, split_audio
 from .transcribe import transcribe, format_as_text
@@ -39,28 +43,35 @@ def process_tape(
     classifier,
     model_size: str = "large-v3",
     language: str = "en",
-):
-    """Process a single tape through the full pipeline."""
+) -> dict:
+    """Process a single tape through the full pipeline. Returns timing dict."""
     tape_name = audio_path.stem
     tape_output = output_dir / tape_name
     tape_output.mkdir(parents=True, exist_ok=True)
+    timings = {"tape": tape_name}
+
+    tape_start = time.time()
 
     # Step 1: Split audio
     logger.info(f"{'='*60}")
     logger.info(f"Processing: {tape_name}")
     logger.info(f"{'='*60}")
     logger.info(f"Step 1: Splitting at {split_ms/1000:.0f}s...")
+    t0 = time.time()
     split_dir = tape_output / "split"
     partner_path, subject_path = split_audio(audio_path, split_ms, split_dir)
+    timings["split_s"] = round(time.time() - t0, 1)
 
-    # Step 2: Transcribe each half
+    # Step 2a: Transcribe partner
     logger.info("Step 2a: Transcribing partner interview...")
+    t0 = time.time()
     partner_transcript = transcribe(
         partner_path,
         num_speakers=2,
         model_size=model_size,
         language=language,
     )
+    timings["transcribe_partner_s"] = round(time.time() - t0, 1)
 
     partner_json_path = tape_output / "partner_transcript.json"
     with open(partner_json_path, "w", encoding="utf-8") as f:
@@ -70,13 +81,16 @@ def process_tape(
     with open(partner_txt_path, "w", encoding="utf-8") as f:
         f.write(format_as_text(partner_transcript))
 
+    # Step 2b: Transcribe subject
     logger.info("Step 2b: Transcribing subject interview...")
+    t0 = time.time()
     subject_transcript = transcribe(
         subject_path,
         num_speakers=2,
         model_size=model_size,
         language=language,
     )
+    timings["transcribe_subject_s"] = round(time.time() - t0, 1)
 
     subject_json_path = tape_output / "subject_transcript.json"
     with open(subject_json_path, "w", encoding="utf-8") as f:
@@ -86,13 +100,20 @@ def process_tape(
     with open(subject_txt_path, "w", encoding="utf-8") as f:
         f.write(format_as_text(subject_transcript))
 
+    # Free GPU memory from transcription before running deid
+    gc.collect()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
     # Step 3: De-identify both together (cross-transcript propagation)
     logger.info("Step 3: De-identifying transcripts (joint session)...")
+    t0 = time.time()
     mapper = DeidMapper()
 
     partner_deid, subject_deid = deid_session(
         [partner_transcript, subject_transcript], classifier, mapper
     )
+    timings["deid_s"] = round(time.time() - t0, 1)
 
     deid_dir = tape_output / "deid"
     deid_dir.mkdir(parents=True, exist_ok=True)
@@ -112,13 +133,22 @@ def process_tape(
 
     # Step 4: Generate HTML viewer
     logger.info("Step 4: Generating HTML viewer...")
+    t0 = time.time()
     html = generate_html(tape_output)
     view_path = tape_output / "view.html"
     view_path.write_text(html)
-    logger.info(f"HTML viewer: {view_path}")
+    timings["viewer_s"] = round(time.time() - t0, 1)
 
-    logger.info(f"Done: {tape_name} → {tape_output}")
-    return tape_output
+    timings["total_s"] = round(time.time() - tape_start, 1)
+    logger.info(
+        f"Done: {tape_name} — "
+        f"split={timings['split_s']}s, "
+        f"transcribe_partner={timings['transcribe_partner_s']}s, "
+        f"transcribe_subject={timings['transcribe_subject_s']}s, "
+        f"deid={timings['deid_s']}s, "
+        f"total={timings['total_s']}s"
+    )
+    return timings
 
 
 def cli():
@@ -151,6 +181,10 @@ def cli():
         "--language", default="en",
         help="Language code for transcription (default: en)",
     )
+    parser.add_argument(
+        "--skip-existing", action="store_true",
+        help="Skip tapes that already have a view.html (fully processed)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -167,21 +201,58 @@ def cli():
         timestamps = {args.tape: timestamps[args.tape]}
 
     logger.info("Loading de-identification model...")
+    t0 = time.time()
     classifier = load_classifier()
+    model_load_time = round(time.time() - t0, 1)
+    logger.info(f"Model loaded in {model_load_time}s")
+
+    all_timings = []
+    run_start = time.time()
 
     for tape_name, split_ms in timestamps.items():
+        if args.skip_existing:
+            existing = output_dir / tape_name / "view.html"
+            if existing.exists():
+                logger.info(f"Skipping (already complete): {tape_name}")
+                continue
+
         audio_path = audio_dir / f"{tape_name}.mp3"
         if not audio_path.exists():
             logger.warning(f"Audio file not found: {audio_path}, skipping")
             continue
-        process_tape(
+        timings = process_tape(
             audio_path, split_ms, output_dir,
             classifier=classifier,
             model_size=args.model_size,
             language=args.language,
         )
+        all_timings.append(timings)
 
-    logger.info("Pipeline complete.")
+    total_run = round(time.time() - run_start, 1)
+
+    # Write timing log
+    log_path = output_dir / "pipeline_timing.json"
+    log_data = {
+        "model_size": args.model_size,
+        "model_load_s": model_load_time,
+        "total_run_s": total_run,
+        "tapes": all_timings,
+    }
+    with open(log_path, "w") as f:
+        json.dump(log_data, f, indent=2)
+
+    # Print summary table
+    logger.info(f"\n{'='*80}")
+    logger.info(f"PIPELINE COMPLETE — {len(all_timings)} tapes in {total_run:.0f}s ({total_run/60:.1f}min)")
+    logger.info(f"{'='*80}")
+    logger.info(f"{'Tape':<40} {'Split':>6} {'Tx-P':>6} {'Tx-S':>6} {'Deid':>6} {'Total':>7}")
+    logger.info(f"{'-'*40} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*7}")
+    for t in all_timings:
+        logger.info(
+            f"{t['tape']:<40} {t['split_s']:>5.0f}s {t['transcribe_partner_s']:>5.0f}s "
+            f"{t['transcribe_subject_s']:>5.0f}s {t['deid_s']:>5.0f}s {t['total_s']:>6.0f}s"
+        )
+    logger.info(f"\nTiming log saved: {log_path}")
 
 
 if __name__ == "__main__":

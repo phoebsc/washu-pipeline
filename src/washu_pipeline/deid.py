@@ -83,13 +83,18 @@ class TurnSpan:
 
 
 def load_classifier():
-    """Load the openai/privacy-filter token classification model."""
-    logger.info("Loading privacy-filter model...")
+    """Load the openai/privacy-filter token classification model on CPU.
+
+    CPU is used to avoid MPS memory contention with whisper.cpp/pyannote
+    when running the full pipeline. The model is fast enough on CPU (~10s).
+    """
+    logger.info("Loading privacy-filter model (CPU)...")
     classifier = hf_pipeline(
         task="token-classification",
         model="openai/privacy-filter",
         token=os.getenv("HF_TOKEN"),
         aggregation_strategy="simple",
+        device="cpu",
     )
     logger.info("Model loaded.")
     return classifier
