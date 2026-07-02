@@ -121,7 +121,7 @@ def _build_mapping_section(mapping: dict[str, str]) -> str:
 
 
 def generate_html(tape_dir: Path) -> str:
-    """Generate full HTML viewer for a processed tape directory."""
+    """Generate full HTML viewer for a processed tape directory (legacy split layout)."""
     tape_name = tape_dir.name
     deid_dir = tape_dir / "deid"
 
@@ -160,6 +160,46 @@ def generate_html(tape_dir: Path) -> str:
 
     return _HTML_TEMPLATE.format(
         tape_name=escape(tape_name),
+        sections="\n".join(sections),
+    )
+
+
+def generate_html_flat(dyad_dir: Path) -> str:
+    """Generate full HTML viewer for a flat dyad directory (no deid/ subdir)."""
+    dyad_name = dyad_dir.name
+    sections = []
+
+    for role in ("partner", "subject"):
+        orig_path = dyad_dir / f"{role}_transcript.json"
+        deid_path = dyad_dir / f"{role}_deid.json"
+
+        if not orig_path.exists() or not deid_path.exists():
+            logger.warning(f"Missing files for {role}, skipping")
+            continue
+
+        with open(orig_path) as f:
+            orig_data = json.load(f)
+        with open(deid_path) as f:
+            deid_data = json.load(f)
+
+        title = "Study Partner Interview" if role == "partner" else "Subject Interview"
+        sections.append(
+            _build_transcript_section(
+                title,
+                role,
+                orig_data["utterances"],
+                deid_data["utterances"],
+            )
+        )
+
+    mapping_path = dyad_dir / "deid_mapping.json"
+    if mapping_path.exists():
+        with open(mapping_path) as f:
+            mapping = json.load(f)
+        sections.append(_build_mapping_section(mapping))
+
+    return _HTML_TEMPLATE.format(
+        tape_name=escape(dyad_name),
         sections="\n".join(sections),
     )
 

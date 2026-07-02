@@ -2,46 +2,132 @@
 
 Local transcription and de-identification pipeline for WashU CDR interview recordings.
 
+---
+
+## Dyad folder workflow (primary)
+
+Use this when you have a folder of dyads, each containing pre-split `partner.mp3` and `participant.mp3` files. The subject interview may also be named `subject.mp3`.
+
+### Input structure
+
+```
+<folder>/
+├── <dyad_id>/
+│   ├── partner.mp3
+│   └── participant.mp3  # or subject.mp3
+├── <dyad_id>/
+│   ├── partner.mp3
+│   └── participant.mp3  # or subject.mp3
+└── ...
+```
+
+### Run
+
+```bash
+uv run washu-run-dyads --input /path/to/folder
+```
+
+Process a single dyad:
+
+```bash
+uv run washu-run-dyads --input /path/to/folder --dyad <dyad_id>
+```
+
+Skip dyads that are already fully processed:
+
+```bash
+uv run washu-run-dyads --input /path/to/folder --skip-existing
+```
+
+### Output structure
+
+Most output lands **inside each dyad subfolder**:
+
+```
+<folder>/<dyad_id>/
+├── partner_transcript.json
+├── partner_transcript.txt
+├── subject_transcript.json
+├── subject_transcript.txt
+├── partner_deid.json
+├── partner_deid.txt
+├── subject_deid.json
+├── subject_deid.txt
+├── deid_mapping.json       ← code-to-PHI lookup (keep secure)
+└── view.html
+```
+
+Four files are written to a **separate output directory** (project root `output/` by default):
+
+```
+output/<dyad_id>/
+├── partner_deid.txt        ← plain-text redacted transcript
+├── subject_deid.txt        ← plain-text redacted transcript
+├── partner_deid_clean.json ← deid JSON with entities stripped
+└── subject_deid_clean.json ← deid JSON with entities stripped
+```
+
+Override the output location:
+
+```bash
+uv run washu-run-dyads --input /path/to/folder --output /path/to/output
+```
+
+---
+
 ## Pipeline
 
 ```
-.mp3 interview audio
-    ↓  split at timestamp
-partner.mp3 + subject.mp3
-    ↓  whisper.cpp + pyannote diarization (fully local)
-partner_transcript.json + subject_transcript.json
-    ↓  openai/privacy-filter model (local inference)
-deid/ (coded transcripts + entity mapping)
+partner.mp3 + participant.mp3 (pre-split)
+    ↓  transcribe.py (whisper.cpp Metal + pyannote diarization)
+*_transcript.json (speaker-diarized, labeled interviewer/participant)
+    ↓  deid.py (openai/privacy-filter local model + propagation)
+*_deid.json / *_deid.txt / *_deid_clean.json
 ```
 
-All processing runs locally after initial model downloads. No API calls.
+All processing runs locally after initial model downloads. No API calls at runtime.
+
+---
 
 ## Setup
 
+See [setup.md](setup.md) for full macOS installation instructions from scratch.
+
+Quick start (assumes `uv` and `ffmpeg` are already installed):
+
 ```bash
 uv sync
-cp .env.example .env  # add HF_TOKEN for pyannote gated model access
+cp .env.example .env  # add HF_TOKEN
 ```
 
-## Usage
+---
 
-### Full pipeline (single tape)
+## De-identification
 
-```bash
-uv run washu-run \
-    --audio-dir "/path/to/Extracted Audio Files (MP3 256kbps)" \
-    --timestamps "/path/to/timestamp_info.txt" \
-    --output output/ \
-    --tape "Tape_11_Interview_(Source)_1"
-```
+Uses `openai/privacy-filter` (1.5B parameter token classifier) for PHI detection, with cross-transcript propagation for consistency. Detected entities are replaced with unique codes (e.g., `[PERSON_01]`, `[DATE_01]`) that remain consistent across both partner and subject transcripts within the same session.
 
-### Full pipeline (all tapes)
+The `deid_mapping.json` contains the code-to-original-text mapping and should be treated as sensitive data. The `*_deid_clean.json` files are the same transcripts with the per-utterance `entities` list removed — safe to share without the mapping.
+
+---
+
+## Legacy: timestamp-split workflow
+
+Use this for older recordings where partner and subject audio are combined into a single file and a timestamp file marks the split point.
+
+### Run
 
 ```bash
 uv run washu-run \
     --audio-dir "/path/to/Extracted Audio Files (MP3 256kbps)" \
     --timestamps "/path/to/timestamp_info.txt" \
     --output output/
+
+# Single tape
+uv run washu-run \
+    --audio-dir "/path/to/audio" \
+    --timestamps "/path/to/timestamp_info.txt" \
+    --output output/ \
+    --tape "Tape_11_Interview_(Source)_1"
 ```
 
 ### Individual steps
@@ -64,7 +150,7 @@ uv run washu-deid \
     --output output/deid/
 ```
 
-## Output structure
+### Output structure
 
 ```
 output/<tape_name>/
@@ -80,11 +166,5 @@ output/<tape_name>/
     ├── partner_deid.txt
     ├── subject_deid.json
     ├── subject_deid.txt
-    └── deid_mapping.json    ← code-to-PHI lookup (keep secure)
+    └── deid_mapping.json
 ```
-
-## De-identification
-
-Uses `openai/privacy-filter` (1.5B parameter token classifier) for PHI detection, with cross-transcript propagation for consistency. Detected entities are replaced with unique codes (e.g., `[PERSON_01]`, `[DATE_01]`) that remain consistent across both partner and subject transcripts within the same session.
-
-The `deid_mapping.json` contains the code-to-original-text mapping and should be treated as sensitive data.
