@@ -12,7 +12,7 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_MODEL = "gemma4:27b"
+OLLAMA_MODEL = "gemma4:31b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
 SPLIT_DETECTION_PROMPT = """\

@@ -19,7 +19,7 @@ Processes historical CDR interview recordings from WashU. Audio files contain tw
 .mp3 (stitched: partner interview + subject interview)
     ↓  transcribe.py — transcribe full audio (whisper.cpp Metal)
 timestamped segments (no speaker labels yet)
-    ↓  ollama_split.py — detect split point (Gemma 4 27B via Ollama)
+    ↓  ollama_split.py — detect split point (Gemma 4 31B via Ollama)
 split_timestamp_seconds
     ↓  transcribe.py — diarize each half (pyannote, num_speakers=2)
     ↓  align whisper segments to speaker turns by timestamp overlap
@@ -64,7 +64,7 @@ HF_TOKEN=...    # HuggingFace (pyannote gated model + privacy-filter)
 
 Required for stitched workflow:
 - Ollama running (`ollama serve`)
-- Gemma 4 27B pulled (`ollama pull gemma4:27b`)
+- Gemma 4 31B pulled (`ollama pull gemma4:31b`)
 
 No Azure/OpenAI keys needed — pipeline is fully local after model downloads.
 

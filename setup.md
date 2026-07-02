@@ -93,18 +93,18 @@ ollama serve
 
 This runs in background on port 11434. You can also launch the Ollama desktop app which starts the server automatically.
 
-### Pull Gemma 4 27B model
+### Pull Gemma 4 31B model
 
 ```bash
-ollama pull gemma4:27b
+ollama pull gemma4:31b
 ```
 
-This downloads ~17 GB. The model requires approximately 20 GB RAM at runtime.
+This downloads ~20 GB. The model requires approximately 22 GB RAM at runtime.
 
 ### Verify Ollama
 
 ```bash
-ollama run gemma4:27b "Hello, respond with just OK"
+ollama run gemma4:31b "Hello, respond with just OK"
 ```
 
 ---
@@ -123,4 +123,4 @@ uv run washu-run-dyads --help
 - All processing runs locally after initial model downloads (no API calls at runtime).
 - First run will download ~3–4 GB of model weights to your HuggingFace cache (`~/.cache/huggingface/`).
 - Apple Silicon (M1/M2/M3) is supported — the pipeline uses Metal (MPS) for transcription and CPU for de-identification.
-- The stitched workflow (`washu-run-stitched`) additionally requires Ollama + Gemma 4 27B for split-point detection.
+- The stitched workflow (`washu-run-stitched`) additionally requires Ollama + Gemma 4 31B for split-point detection.
