@@ -5,8 +5,8 @@ Speakers are labeled as 'interviewer' and 'participant'.
 
 After initial model download, runs completely locally with no network calls.
 
-Pipeline: diarize first (exclusive mode, min_duration_off=0.3), then transcribe each segment
-individually with whisper.cpp.
+Pipeline: transcribe full audio first (whisper.cpp), then diarize (pyannote), then align
+speaker labels to transcription segments by timestamp overlap.
 
 Produces:
   <output_dir>/diarized_transcript.json   — structured JSON with speaker-labeled utterances
@@ -17,12 +17,10 @@ import argparse
 import json
 import logging
 import os
-import tempfile
 from pathlib import Path
 
 import librosa
 import numpy as np
-import soundfile as sf
 import torch
 from dotenv import load_dotenv
 from pyannote.audio import Pipeline
@@ -119,48 +117,100 @@ def load_whisper_model(model_path: Path) -> WhisperModel:
         no_speech_thold=0.5,
         suppress_blank=True,
         suppress_nst=True,
-        max_tokens=100,
+        max_tokens=0,
         temperature=0.0,
         temperature_inc=0.2,
     )
 
 
-def transcribe_segment(
-    audio: np.ndarray,
-    segment: dict,
+def transcribe_full_audio(
+    audio_path: Path,
     model: WhisperModel,
     language: str = "en",
-) -> dict:
-    """Transcribe a single diarization segment using whisper.cpp."""
-    start_sample = int(segment["start"] * SAMPLE_RATE)
-    end_sample = int(segment["end"] * SAMPLE_RATE)
-    chunk = audio[start_sample:end_sample]
+) -> list[dict]:
+    """Transcribe the entire audio file with whisper.cpp.
 
-    if len(chunk) < SAMPLE_RATE * 0.1:
-        return {**segment, "text": ""}
+    Returns list of segments with timestamps in seconds:
+    [{"start": float, "end": float, "text": str}, ...]
+    """
+    logger.info(f"Transcribing full audio: {audio_path}")
+    segments = model.transcribe(str(audio_path), language=language)
+    result = []
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        result.append({
+            "start": round(seg.t0 / 100.0, 3),
+            "end": round(seg.t1 / 100.0, 3),
+            "text": text,
+        })
+    logger.info(f"Whisper produced {len(result)} segments")
+    return result
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = tmp.name
-        sf.write(tmp_path, chunk, SAMPLE_RATE)
 
-    try:
-        segments = model.transcribe(tmp_path, language=language)
-        text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+def align_segments_to_speakers(
+    whisper_segments: list[dict],
+    diar_segments: list[dict],
+) -> list[dict]:
+    """Assign speaker labels to whisper segments by maximum temporal overlap.
 
-    return {**segment, "text": text}
+    For each whisper segment, finds the diarization turn with the greatest
+    overlap duration and assigns that speaker label. Falls back to nearest
+    speaker by time proximity if no overlap exists.
+    """
+    if not diar_segments:
+        return [{"speaker": "unknown", **seg} for seg in whisper_segments]
+
+    aligned = []
+    for wseg in whisper_segments:
+        ws, we = wseg["start"], wseg["end"]
+        best_speaker = None
+        best_overlap = 0.0
+
+        for dseg in diar_segments:
+            ds, de = dseg["start"], dseg["end"]
+            overlap = max(0.0, min(we, de) - max(ws, ds))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = dseg["speaker"]
+
+        if best_speaker is None:
+            min_dist = float("inf")
+            for dseg in diar_segments:
+                dist = min(abs(ws - dseg["end"]), abs(we - dseg["start"]))
+                if dist < min_dist:
+                    min_dist = dist
+                    best_speaker = dseg["speaker"]
+
+        aligned.append({
+            "speaker": best_speaker,
+            "start": ws,
+            "end": we,
+            "text": wseg["text"],
+        })
+
+    return aligned
 
 
 def diarize(audio_path: Path, diarization_pipeline: Pipeline, num_speakers: int) -> list[dict]:
     logger.info(f"Running diarization on {audio_path} (num_speakers={num_speakers})")
     waveform, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
+    return diarize_array(waveform, diarization_pipeline, num_speakers)
+
+
+def diarize_array(
+    audio: np.ndarray,
+    diarization_pipeline: Pipeline,
+    num_speakers: int,
+) -> list[dict]:
+    """Run pyannote diarization on an in-memory audio array (mono, 16kHz)."""
     chunk_samples = 10 * SAMPLE_RATE
-    remainder = len(waveform) % chunk_samples
+    remainder = len(audio) % chunk_samples
     if remainder > 0:
         pad_length = chunk_samples - remainder
-        waveform = np.pad(waveform, (0, pad_length), mode="constant")
-    waveform_tensor = torch.from_numpy(waveform).unsqueeze(0)
+        audio = np.pad(audio, (0, pad_length), mode="constant")
+    waveform_tensor = torch.from_numpy(audio).unsqueeze(0)
     audio_input = {"waveform": waveform_tensor, "sample_rate": SAMPLE_RATE}
     result = diarization_pipeline(audio_input, num_speakers=num_speakers)
 
@@ -242,29 +292,27 @@ def transcribe(
     if model_path is None:
         model_path = get_model_path(model_size)
 
-    logger.info("Loading diarization pipeline...")
-    diarization_pipeline = load_diarization_pipeline(device, hf_token)
+    # Step 1: Transcribe full audio with whisper.cpp
+    logger.info(f"Loading whisper.cpp model: {model_path.name}")
+    whisper_model = load_whisper_model(model_path)
+    whisper_segments = transcribe_full_audio(audio_path, whisper_model, language)
 
+    # Step 2: Diarize full audio with pyannote
     audio = load_audio(audio_path)
     audio_duration = len(audio) / SAMPLE_RATE
     logger.info(f"Audio loaded: {audio_duration:.1f}s")
 
+    logger.info("Loading diarization pipeline...")
+    diarization_pipeline = load_diarization_pipeline(device, hf_token)
+
     logger.info("Running pyannote diarization...")
     diar_segments = diarize(audio_path, diarization_pipeline, num_speakers)
 
-    logger.info(f"Loading whisper.cpp model: {model_path.name}")
-    whisper_model = load_whisper_model(model_path)
+    # Step 3: Align whisper segments to speaker turns
+    logger.info("Aligning transcription to speaker diarization...")
+    utterances = align_segments_to_speakers(whisper_segments, diar_segments)
 
-    logger.info(f"Transcribing {len(diar_segments)} diarized segments...")
-    utterances = []
-    for i, seg in enumerate(diar_segments):
-        result = transcribe_segment(audio, seg, whisper_model, language)
-        if result.get("text"):
-            utterances.append(result)
-        if (i + 1) % 50 == 0:
-            logger.info(f"  Transcribed {i + 1}/{len(diar_segments)} segments")
-
-    utterances.sort(key=lambda u: u["start"])
+    # Step 4: Post-processing
     utterances = merge_consecutive_segments(utterances)
     utterances = remap_speakers(utterances, interviewer_label)
 

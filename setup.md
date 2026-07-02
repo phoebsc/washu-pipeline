@@ -75,13 +75,46 @@ The token is required for the `pyannote/speaker-diarization-3.1` gated model and
 
 ---
 
-## 8. Verify
+## 8. Ollama (for stitched audio split detection)
+
+Required only for processing stitched recordings where the split point is unknown.
+
+### Install Ollama
 
 ```bash
-uv run washu-run-dyads --help
+brew install ollama
 ```
 
-You should see the command-line help for the dyad pipeline.
+### Start Ollama server
+
+```bash
+ollama serve
+```
+
+This runs in background on port 11434. You can also launch the Ollama desktop app which starts the server automatically.
+
+### Pull Gemma 4 27B model
+
+```bash
+ollama pull gemma4:27b
+```
+
+This downloads ~17 GB. The model requires approximately 20 GB RAM at runtime.
+
+### Verify Ollama
+
+```bash
+ollama run gemma4:27b "Hello, respond with just OK"
+```
+
+---
+
+## 9. Verify
+
+```bash
+uv run washu-run-stitched --help
+uv run washu-run-dyads --help
+```
 
 ---
 
@@ -90,3 +123,4 @@ You should see the command-line help for the dyad pipeline.
 - All processing runs locally after initial model downloads (no API calls at runtime).
 - First run will download ~3–4 GB of model weights to your HuggingFace cache (`~/.cache/huggingface/`).
 - Apple Silicon (M1/M2/M3) is supported — the pipeline uses Metal (MPS) for transcription and CPU for de-identification.
+- The stitched workflow (`washu-run-stitched`) additionally requires Ollama + Gemma 4 27B for split-point detection.
