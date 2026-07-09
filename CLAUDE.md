@@ -66,6 +66,18 @@ Required for stitched workflow:
 - Ollama running (`ollama serve`)
 - Gemma 4 31B pulled (`ollama pull gemma4:31b`)
 
+Ollama performance tuning (set in the Homebrew plist or systemd unit):
+```bash
+# macOS: edit ~/Library/LaunchAgents/homebrew.mxcl.ollama.plist EnvironmentVariables
+OLLAMA_KV_CACHE_TYPE=q8_0
+OLLAMA_FLASH_ATTENTION=1
+
+# Linux (add to ~/.bashrc or systemd unit)
+export OLLAMA_KV_CACHE_TYPE=q8_0
+export OLLAMA_FLASH_ATTENTION=1
+```
+The 31B model (19GB weights) does NOT fit fully on GPU on machines with <24GB available working set. It runs with ~27%/73% CPU/GPU split, which is slow (~22 min per split detection) but produces correct results. The pipeline timeout is set to 30 minutes to accommodate this. Do NOT downgrade to the smaller model — it produces incorrect split points.
+
 No Azure/OpenAI keys needed — pipeline is fully local after model downloads.
 
 ---

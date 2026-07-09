@@ -15,31 +15,39 @@ logger = logging.getLogger(__name__)
 OLLAMA_MODEL = "gemma4:31b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
-SPLIT_DETECTION_PROMPT = """\
+SPLIT_DETECTION_PROMPT_PREFIX = """\
 You are analyzing a transcript of a clinical interview recording.
 The recording contains TWO consecutive interviews:
-1. First: an interview with the STUDY PARTNER (typically a spouse or family member)
+1. First: an interview with the STUDY PARTNER (informant, typically a spouse or family member)
 2. Second: an interview with the SUBJECT (the patient themselves)
 
 The interviewer conducts both interviews back-to-back in a single recording.
 
+Clinical context for identifying the transition:
+- The INFORMANT interview always comes FIRST and typically ends with questions about \
+the subject's personal care (e.g., bowel habits, eating habits, self-care abilities).
+- The SUBJECT interview always comes SECOND and typically begins with the interviewer \
+asking the subject about their own memory and thinking.
+- The transition may also be marked by the interviewer thanking/dismissing the partner \
+and greeting/welcoming the subject.
+
 Your task: Find the exact point where the interviewer transitions from the partner \
-interview to the subject interview. This typically happens when:
-- The interviewer thanks or dismisses the partner
-- The interviewer greets or welcomes the subject
-- There is a clear shift in who is being addressed
-- The conversation resets to introductory questions after a period of substantive interview
+interview to the subject interview.
 
 Each line in the transcript below has the format: [start_seconds-end_seconds]: text
 Speaker labels are NOT available — you must detect the transition based on CONTENT.
 
-Respond with ONLY a JSON object in this exact format:
+TRANSCRIPT:
+"""
+
+SPLIT_DETECTION_PROMPT_SUFFIX = """
+
+END OF TRANSCRIPT.
+
+Now identify the split point. Respond with ONLY this JSON object, nothing else:
 {"split_timestamp_seconds": <float>, "confidence": "<high|medium|low>", "reasoning": "<brief explanation>"}
 
-The split_timestamp_seconds should be the START timestamp of the first utterance \
-that belongs to the subject interview.
-
-TRANSCRIPT:
+split_timestamp_seconds = the START time (in seconds) of the first utterance belonging to the SUBJECT interview.
 """
 
 
@@ -68,6 +76,11 @@ def check_ollama_available(model: str = OLLAMA_MODEL) -> bool:
 
 def _call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
     """Call Ollama generate API. Returns the response text."""
+    prompt_chars = len(prompt)
+    estimated_tokens = prompt_chars // 3
+    num_ctx = estimated_tokens + 2048
+    logger.info(f"Prompt: {prompt_chars} chars (~{estimated_tokens} tokens), num_ctx: {num_ctx}")
+
     payload = json.dumps({
         "model": model,
         "prompt": prompt,
@@ -75,7 +88,7 @@ def _call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
         "format": "json",
         "options": {
             "temperature": 0.1,
-            "num_ctx": 32768,
+            "num_ctx": num_ctx,
         },
     }).encode()
 
@@ -86,9 +99,17 @@ def _call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
     )
 
     logger.info(f"Calling Ollama ({model}) for split-point detection...")
-    with urllib.request.urlopen(req, timeout=600) as resp:
+    with urllib.request.urlopen(req, timeout=1800) as resp:
         result = json.loads(resp.read())
-        return result["response"]
+        response = result["response"]
+        if not response.strip():
+            logger.error(
+                f"Ollama returned empty response. "
+                f"prompt_tokens={result.get('prompt_eval_count')}, "
+                f"eval_tokens={result.get('eval_count')}, "
+                f"total_duration_ms={result.get('total_duration', 0) // 1_000_000}"
+            )
+        return response
 
 
 def _format_transcript_for_llm(whisper_segments: list[dict]) -> str:
@@ -124,7 +145,7 @@ def detect_split_point(
         )
 
     transcript_text = _format_transcript_for_llm(whisper_segments)
-    prompt = SPLIT_DETECTION_PROMPT + transcript_text
+    prompt = SPLIT_DETECTION_PROMPT_PREFIX + transcript_text + SPLIT_DETECTION_PROMPT_SUFFIX
 
     response_text = _call_ollama(prompt, model)
 
@@ -134,6 +155,9 @@ def detect_split_point(
         raise RuntimeError(
             f"Ollama returned unparseable response. Raw output:\n{response_text[:500]}"
         )
+
+    if "confidence_reasoning" in result and "reasoning" not in result:
+        result["reasoning"] = result.pop("confidence_reasoning")
 
     required_keys = {"split_timestamp_seconds", "confidence", "reasoning"}
     if not required_keys.issubset(result.keys()):

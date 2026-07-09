@@ -130,32 +130,45 @@ def process_stitched(
     logger.info(f"Processing: {tape_name}")
     logger.info(f"{'=' * 60}")
 
-    # Step 1: Transcribe full audio
-    logger.info("Step 1: Transcribing full audio...")
-    t0 = time.time()
+    # Step 1: Transcribe full audio (skip if cached)
+    cached_transcript = tape_output / "full_transcript.json"
+    if cached_transcript.exists():
+        logger.info("Step 1: Loading cached transcription from full_transcript.json")
+        with open(cached_transcript, encoding="utf-8") as f:
+            raw_transcript = json.load(f)
+        whisper_segments = raw_transcript["segments"]
+        audio_duration = raw_transcript["metadata"]["audio_duration_seconds"]
+        timings["transcribe_s"] = 0.0
+        logger.info(
+            f"Loaded {len(whisper_segments)} segments, "
+            f"duration: {audio_duration:.1f}s ({audio_duration/60:.1f}min)"
+        )
+    else:
+        logger.info("Step 1: Transcribing full audio...")
+        t0 = time.time()
 
-    model_path = get_model_path(model_size)
-    whisper_model = load_whisper_model(model_path)
-    whisper_segments = transcribe_full_audio(audio_path, whisper_model, language)
-    del whisper_model
-    timings["transcribe_s"] = round(time.time() - t0, 1)
+        model_path = get_model_path(model_size)
+        whisper_model = load_whisper_model(model_path)
+        whisper_segments = transcribe_full_audio(audio_path, whisper_model, language)
+        del whisper_model
+        timings["transcribe_s"] = round(time.time() - t0, 1)
 
-    # Load audio for duration and later diarization
-    audio = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)[0]
-    audio_duration = len(audio) / SAMPLE_RATE
-    logger.info(f"Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f}min)")
+        # Load audio for duration
+        audio = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)[0]
+        audio_duration = len(audio) / SAMPLE_RATE
+        logger.info(f"Audio duration: {audio_duration:.1f}s ({audio_duration/60:.1f}min)")
 
-    # Save raw transcript
-    raw_transcript = {
-        "segments": whisper_segments,
-        "metadata": {
-            "model": f"whisper.cpp/ggml-{model_size}",
-            "audio_duration_seconds": round(audio_duration, 2),
-            "num_segments": len(whisper_segments),
-        },
-    }
-    with open(tape_output / "full_transcript.json", "w", encoding="utf-8") as f:
-        json.dump(raw_transcript, f, indent=2, ensure_ascii=False)
+        # Save raw transcript
+        raw_transcript = {
+            "segments": whisper_segments,
+            "metadata": {
+                "model": f"whisper.cpp/ggml-{model_size}",
+                "audio_duration_seconds": round(audio_duration, 2),
+                "num_segments": len(whisper_segments),
+            },
+        }
+        with open(cached_transcript, "w", encoding="utf-8") as f:
+            json.dump(raw_transcript, f, indent=2, ensure_ascii=False)
 
     # Step 2: Detect split point with LLM
     logger.info("Step 2: Detecting split point with LLM...")
@@ -180,6 +193,7 @@ def process_stitched(
     logger.info("Step 3: Diarizing each half...")
     t0 = time.time()
 
+    audio = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)[0]
     device = get_device()
     hf_token = __import__("os").environ.get("HF_TOKEN")
     diarization_pipeline = load_diarization_pipeline(device, hf_token)
