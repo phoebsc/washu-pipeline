@@ -74,7 +74,7 @@ def check_ollama_available(model: str = OLLAMA_MODEL) -> bool:
         return False
 
 
-def _call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
+def call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
     """Call Ollama generate API. Returns the response text."""
     prompt_chars = len(prompt)
     estimated_tokens = prompt_chars // 3
@@ -147,7 +147,7 @@ def detect_split_point(
     transcript_text = _format_transcript_for_llm(whisper_segments)
     prompt = SPLIT_DETECTION_PROMPT_PREFIX + transcript_text + SPLIT_DETECTION_PROMPT_SUFFIX
 
-    response_text = _call_ollama(prompt, model)
+    response_text = call_ollama(prompt, model)
 
     try:
         result = json.loads(response_text)

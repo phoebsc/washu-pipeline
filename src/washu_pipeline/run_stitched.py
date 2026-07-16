@@ -39,6 +39,7 @@ from .transcribe import (
     transcribe_vad_chunks,
 )
 from .ollama_split import detect_split_point, OLLAMA_MODEL
+from .ollama_score import score_transcript
 from .deid import load_classifier, DeidMapper, deid_session
 from .viewer import generate_html
 
@@ -313,7 +314,20 @@ def process_stitched(
         with open(tape_output / "subject_transcript.txt", "w", encoding="utf-8") as f:
             f.write(format_as_text(subject_transcript))
 
-    # Step 5: De-identify
+    # Step 5: Score transcript (Ollama)
+    scores_path = tape_output / "scores.json"
+    if scores_path.exists() and use_cached_transcripts:
+        logger.info("Step 5: Loading cached scores")
+        timings["score_s"] = 0.0
+    else:
+        logger.info("Step 5: Scoring transcript with LLM...")
+        t0 = time.time()
+        scores = score_transcript(tape_output, model=ollama_model)
+        timings["score_s"] = round(time.time() - t0, 1)
+        with open(scores_path, "w", encoding="utf-8") as f:
+            json.dump(scores, f, indent=2, ensure_ascii=False)
+
+    # Step 6: De-identify
     deid_dir = tape_output / "deid"
     deid_dir.mkdir(parents=True, exist_ok=True)
     partner_deid_path = deid_dir / "partner_deid.json"
@@ -326,10 +340,10 @@ def process_stitched(
         and mapping_path.exists()
     )
     if use_cached_deid:
-        logger.info("Step 5: Loading cached de-identified transcripts")
+        logger.info("Step 6: Loading cached de-identified transcripts")
         timings["deid_s"] = 0.0
     else:
-        logger.info("Step 5: De-identifying transcripts (joint session)...")
+        logger.info("Step 6: De-identifying transcripts (joint session)...")
         t0 = time.time()
         mapper = DeidMapper()
         partner_deid, subject_deid = deid_session(
@@ -350,13 +364,13 @@ def process_stitched(
         with open(mapping_path, "w", encoding="utf-8") as f:
             json.dump(mapper.get_mapping(), f, indent=2, ensure_ascii=False)
 
-    # Step 6: Generate HTML viewer
+    # Step 7: Generate HTML viewer
     view_path = tape_output / "view.html"
     if view_path.exists() and use_cached_deid:
-        logger.info("Step 6: Using cached HTML viewer")
+        logger.info("Step 7: Using cached HTML viewer")
         timings["viewer_s"] = 0.0
     else:
-        logger.info("Step 6: Generating HTML viewer...")
+        logger.info("Step 7: Generating HTML viewer...")
         t0 = time.time()
         html = generate_html(tape_output)
         view_path.write_text(html)
