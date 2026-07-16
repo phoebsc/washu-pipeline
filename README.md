@@ -108,6 +108,22 @@ Uses `openai/privacy-filter` (1.5B parameter token classifier) for PHI detection
 
 The `deid_mapping.json` contains the code-to-original-text mapping and should be treated as sensitive data. The `*_deid_clean.json` files are the same transcripts with the per-utterance `entities` list removed — safe to share without the mapping.
 
+### Review and edit de-identification
+
+Open the Desktop launcher:
+
+```bash
+~/Desktop/Open\ WashU\ Deid\ Editor.command
+```
+
+Or run it from the project folder:
+
+```bash
+uv run washu-deid-editor --output output
+```
+
+The editor opens a local webpage with a dyad dropdown. Existing entities can be removed by clicking a highlighted span, and new entities can be added by selecting or typing exact text and choosing an entity type. Saving rewrites the edited files in `output/<dyad_id>/deid/` and refreshes `output/<dyad_id>/view.html`.
+
 ---
 
 ## Legacy: timestamp-split workflow

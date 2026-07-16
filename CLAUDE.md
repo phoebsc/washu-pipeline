@@ -65,6 +65,14 @@ deid/ (coded transcripts + deid_mapping.json)
 | `washu-split` | `split_audio.py` | Split audio at timestamp into partner/subject |
 | `washu-transcribe` | `transcribe.py` | Whisper.cpp + pyannote transcription |
 | `washu-deid` | `deid.py` | Local model de-identification with coded entities |
+| `washu-deid-editor` | `deid_editor.py` | Local webpage for reviewing/editing de-id entities |
+
+Desktop launcher:
+```bash
+/Users/fadchen/Desktop/Open\ WashU\ Deid\ Editor.command
+```
+
+The de-id editor opens a local webpage for `output/` with a dyad dropdown. Users can click highlighted entities to remove them, or select/type exact text and choose an entity type to add new entities. The checkbox applies add/remove to every exact same text/type match across both partner and subject transcripts. Every add/remove action autosaves immediately, rewriting `output/<dyad_id>/deid/{partner_deid.json,subject_deid.json,partner_deid.txt,subject_deid.txt,deid_mapping.json}` and refreshing `output/<dyad_id>/view.html`.
 
 ---
 
@@ -105,3 +113,4 @@ No Azure/OpenAI keys needed — pipeline is fully local after model downloads.
 6. Stitched transcription should use `large-v3-turbo` with `--vad-chunked-transcription`
 7. Stitched transcripts should preserve no-merge utterances after speaker alignment
 8. Transcription order: whisper first (VAD-chunked full-audio timeline), then split detection, then pyannote diarization, then align
+9. The de-id editor autosaves each add/remove edit; do not reintroduce a manual save button unless explicitly requested
