@@ -17,16 +17,29 @@ Processes historical CDR interview recordings from WashU. Audio files contain tw
 
 ```
 .mp3 (stitched: partner interview + subject interview)
-    ↓  transcribe.py — transcribe full audio (whisper.cpp Metal)
+    ↓  transcribe.py — transcribe full audio (whisper.cpp Metal, large-v3-turbo + VAD chunks)
 timestamped segments (no speaker labels yet)
     ↓  ollama_split.py — detect split point (Gemma 4 31B via Ollama)
 split_timestamp_seconds
     ↓  transcribe.py — diarize each half (pyannote, num_speakers=2)
-    ↓  align whisper segments to speaker turns by timestamp overlap
+    ↓  align whisper segments to speaker turns by timestamp overlap (no merge)
 partner_transcript.json + subject_transcript.json
     ↓  deid.py (openai/privacy-filter local model + propagation)
 deid/ (coded transcripts + deid_mapping.json)
 ```
+
+Recommended stitched command:
+```bash
+uv run washu-run-stitched \
+  --input /Users/fadchen/Desktop/interview_data \
+  --output /Users/fadchen/Desktop/washu_pipeline/output \
+  --model-size large-v3-turbo \
+  --vad-chunked-transcription
+```
+
+VAD chunking detects the non-silent parts of the recording and transcribes them as short chunks instead of asking Whisper to process the entire tape as one long context. This keeps timestamps in the original audio timeline, but reduces the chance that quiet/noisy regions make Whisper hallucinate repeated phrases such as “The End” or looping filler.
+
+The stitched workflow does not merge consecutive same-speaker Whisper segments after diarization. This preserves short Q/A turns and avoids turning diarization mistakes into large single-speaker blocks. Use `--skip-existing` only when you intentionally want to leave already generated outputs untouched.
 
 ## Pipeline (legacy — known split timestamp)
 
@@ -89,4 +102,6 @@ No Azure/OpenAI keys needed — pipeline is fully local after model downloads.
 3. Audio files and output/ are gitignored
 4. Speaker labels are interviewer/participant (not agent/participant)
 5. Partner and subject transcripts share a single DeidMapper for consistent entity codes
-6. Transcription order: whisper first (full audio context), then pyannote diarization, then align
+6. Stitched transcription should use `large-v3-turbo` with `--vad-chunked-transcription`
+7. Stitched transcripts should preserve no-merge utterances after speaker alignment
+8. Transcription order: whisper first (VAD-chunked full-audio timeline), then split detection, then pyannote diarization, then align

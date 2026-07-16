@@ -34,9 +34,9 @@ from .transcribe import (
     get_model_path,
     load_diarization_pipeline,
     load_whisper_model,
-    merge_consecutive_segments,
     remap_speakers,
     transcribe_full_audio,
+    transcribe_vad_chunks,
 )
 from .ollama_split import detect_split_point, OLLAMA_MODEL
 from .deid import load_classifier, DeidMapper, deid_session
@@ -107,6 +107,7 @@ def _build_transcript_dict(
             "audio_duration_seconds": round(audio_duration, 2),
             "language": language,
             "source": half_label,
+            "merge_consecutive_segments": False,
         },
     }
 
@@ -118,6 +119,8 @@ def process_stitched(
     model_size: str = "large-v3",
     language: str = "en",
     ollama_model: str = OLLAMA_MODEL,
+    vad_chunked_transcription: bool = False,
+    stop_after_transcription: bool = False,
 ) -> dict:
     """Process a single stitched recording through the full pipeline."""
     tape_name = audio_path.stem
@@ -132,24 +135,47 @@ def process_stitched(
 
     # Step 1: Transcribe full audio (skip if cached)
     cached_transcript = tape_output / "full_transcript.json"
+    expected_model = f"whisper.cpp/ggml-{model_size}"
+    expected_mode = "vad_chunks" if vad_chunked_transcription else "full_audio"
+    use_cached_transcript = False
+    regenerated_transcript = False
     if cached_transcript.exists():
         logger.info("Step 1: Loading cached transcription from full_transcript.json")
         with open(cached_transcript, encoding="utf-8") as f:
             raw_transcript = json.load(f)
-        whisper_segments = raw_transcript["segments"]
-        audio_duration = raw_transcript["metadata"]["audio_duration_seconds"]
-        timings["transcribe_s"] = 0.0
-        logger.info(
-            f"Loaded {len(whisper_segments)} segments, "
-            f"duration: {audio_duration:.1f}s ({audio_duration/60:.1f}min)"
+
+        metadata = raw_transcript.get("metadata", {})
+        cached_model = metadata.get("model")
+        cached_mode = metadata.get("transcription_mode", "full_audio")
+        use_cached_transcript = (
+            cached_model == expected_model
+            and cached_mode == expected_mode
         )
-    else:
+        if use_cached_transcript:
+            whisper_segments = raw_transcript["segments"]
+            audio_duration = metadata["audio_duration_seconds"]
+            timings["transcribe_s"] = 0.0
+            logger.info(
+                f"Loaded {len(whisper_segments)} segments, "
+                f"duration: {audio_duration:.1f}s ({audio_duration/60:.1f}min)"
+            )
+        else:
+            logger.info(
+                "Cached transcription does not match requested model/mode "
+                f"({cached_model}, {cached_mode}); regenerating"
+            )
+
+    if not use_cached_transcript:
+        regenerated_transcript = True
         logger.info("Step 1: Transcribing full audio...")
         t0 = time.time()
 
         model_path = get_model_path(model_size)
         whisper_model = load_whisper_model(model_path)
-        whisper_segments = transcribe_full_audio(audio_path, whisper_model, language)
+        if vad_chunked_transcription:
+            whisper_segments = transcribe_vad_chunks(audio_path, whisper_model, language)
+        else:
+            whisper_segments = transcribe_full_audio(audio_path, whisper_model, language)
         del whisper_model
         timings["transcribe_s"] = round(time.time() - t0, 1)
 
@@ -162,7 +188,8 @@ def process_stitched(
         raw_transcript = {
             "segments": whisper_segments,
             "metadata": {
-                "model": f"whisper.cpp/ggml-{model_size}",
+                "model": expected_model,
+                "transcription_mode": expected_mode,
                 "audio_duration_seconds": round(audio_duration, 2),
                 "num_segments": len(whisper_segments),
             },
@@ -170,14 +197,28 @@ def process_stitched(
         with open(cached_transcript, "w", encoding="utf-8") as f:
             json.dump(raw_transcript, f, indent=2, ensure_ascii=False)
 
-    # Step 2: Detect split point with LLM
-    logger.info("Step 2: Detecting split point with LLM...")
-    t0 = time.time()
-    split_info = detect_split_point(whisper_segments, audio_duration, ollama_model)
-    timings["split_detect_s"] = round(time.time() - t0, 1)
+    if stop_after_transcription:
+        logger.info("Stopping after Step 1 transcription as requested")
+        timings["total_s"] = round(time.time() - tape_start, 1)
+        return timings
 
-    with open(tape_output / "split_info.json", "w", encoding="utf-8") as f:
-        json.dump(split_info, f, indent=2, ensure_ascii=False)
+    # Step 2: Detect split point with LLM
+    split_info_path = tape_output / "split_info.json"
+    use_cached_split = False
+    if split_info_path.exists() and not regenerated_transcript:
+        logger.info("Step 2: Loading cached split point from split_info.json")
+        with open(split_info_path, encoding="utf-8") as f:
+            split_info = json.load(f)
+        timings["split_detect_s"] = 0.0
+        use_cached_split = True
+    else:
+        logger.info("Step 2: Detecting split point with LLM...")
+        t0 = time.time()
+        split_info = detect_split_point(whisper_segments, audio_duration, ollama_model)
+        timings["split_detect_s"] = round(time.time() - t0, 1)
+
+        with open(split_info_path, "w", encoding="utf-8") as f:
+            json.dump(split_info, f, indent=2, ensure_ascii=False)
 
     split_time = split_info["split_timestamp_seconds"]
     logger.info(f"Split point: {split_time:.1f}s ({split_time/60:.1f}min)")
@@ -189,95 +230,137 @@ def process_stitched(
         f"Subject: {len(subject_segments)} segments"
     )
 
-    # Step 3: Diarize each half
-    logger.info("Step 3: Diarizing each half...")
-    t0 = time.time()
+    partner_json_path = tape_output / "partner_transcript.json"
+    subject_json_path = tape_output / "subject_transcript.json"
+    use_cached_transcripts = False
+    if use_cached_split and partner_json_path.exists() and subject_json_path.exists():
+        with open(partner_json_path, encoding="utf-8") as f:
+            partner_transcript = json.load(f)
+        with open(subject_json_path, encoding="utf-8") as f:
+            subject_transcript = json.load(f)
 
-    audio = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)[0]
-    device = get_device()
-    hf_token = __import__("os").environ.get("HF_TOKEN")
-    diarization_pipeline = load_diarization_pipeline(device, hf_token)
+        partner_no_merge = (
+            partner_transcript.get("metadata", {}).get("merge_consecutive_segments") is False
+        )
+        subject_no_merge = (
+            subject_transcript.get("metadata", {}).get("merge_consecutive_segments") is False
+        )
+        use_cached_transcripts = partner_no_merge and subject_no_merge
+        if use_cached_transcripts:
+            logger.info("Step 3/4: Loading cached no-merge partner/subject transcripts")
+            timings["diarize_s"] = 0.0
+        else:
+            logger.info(
+                "Cached partner/subject transcripts were generated with merged "
+                "utterances; regenerating no-merge transcripts"
+            )
+    else:
+        partner_transcript = subject_transcript = None
 
-    split_sample = int(split_time * SAMPLE_RATE)
-    partner_audio = audio[:split_sample]
-    subject_audio = audio[split_sample:]
+    if not use_cached_transcripts:
+        # Step 3: Diarize each half
+        logger.info("Step 3: Diarizing each half...")
+        t0 = time.time()
 
-    logger.info("  Diarizing partner half...")
-    partner_diar = diarize_array(partner_audio, diarization_pipeline, num_speakers=2)
+        audio = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)[0]
+        device = get_device()
+        hf_token = __import__("os").environ.get("HF_TOKEN")
+        diarization_pipeline = load_diarization_pipeline(device, hf_token)
 
-    logger.info("  Diarizing subject half...")
-    subject_diar = diarize_array(subject_audio, diarization_pipeline, num_speakers=2)
+        split_sample = int(split_time * SAMPLE_RATE)
+        partner_audio = audio[:split_sample]
+        subject_audio = audio[split_sample:]
 
-    del diarization_pipeline, audio, partner_audio, subject_audio
-    gc.collect()
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-    timings["diarize_s"] = round(time.time() - t0, 1)
+        logger.info("  Diarizing partner half...")
+        partner_diar = diarize_array(partner_audio, diarization_pipeline, num_speakers=2)
 
-    # Step 4: Align whisper segments to speaker turns
-    logger.info("Step 4: Aligning segments to speakers...")
-    partner_utterances = align_segments_to_speakers(partner_segments, partner_diar)
-    subject_utterances = align_segments_to_speakers(subject_segments, subject_diar)
+        logger.info("  Diarizing subject half...")
+        subject_diar = diarize_array(subject_audio, diarization_pipeline, num_speakers=2)
 
-    partner_utterances = merge_consecutive_segments(partner_utterances)
-    subject_utterances = merge_consecutive_segments(subject_utterances)
+        del diarization_pipeline, audio, partner_audio, subject_audio
+        gc.collect()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        timings["diarize_s"] = round(time.time() - t0, 1)
 
-    partner_utterances = remap_speakers(partner_utterances)
-    subject_utterances = remap_speakers(subject_utterances)
+        # Step 4: Align whisper segments to speaker turns
+        logger.info("Step 4: Aligning segments to speakers...")
+        partner_utterances = align_segments_to_speakers(partner_segments, partner_diar)
+        subject_utterances = align_segments_to_speakers(subject_segments, subject_diar)
 
-    # Build transcript dicts
-    partner_duration = split_time
-    subject_duration = audio_duration - split_time
+        partner_utterances = remap_speakers(partner_utterances)
+        subject_utterances = remap_speakers(subject_utterances)
 
-    partner_transcript = _build_transcript_dict(
-        partner_utterances, model_size, partner_duration, language, "partner"
-    )
-    subject_transcript = _build_transcript_dict(
-        subject_utterances, model_size, subject_duration, language, "subject"
-    )
+        # Build transcript dicts
+        partner_duration = split_time
+        subject_duration = audio_duration - split_time
 
-    # Save transcripts
-    with open(tape_output / "partner_transcript.json", "w", encoding="utf-8") as f:
-        json.dump(partner_transcript, f, indent=2, ensure_ascii=False)
-    with open(tape_output / "partner_transcript.txt", "w", encoding="utf-8") as f:
-        f.write(format_as_text(partner_transcript))
+        partner_transcript = _build_transcript_dict(
+            partner_utterances, model_size, partner_duration, language, "partner"
+        )
+        subject_transcript = _build_transcript_dict(
+            subject_utterances, model_size, subject_duration, language, "subject"
+        )
 
-    with open(tape_output / "subject_transcript.json", "w", encoding="utf-8") as f:
-        json.dump(subject_transcript, f, indent=2, ensure_ascii=False)
-    with open(tape_output / "subject_transcript.txt", "w", encoding="utf-8") as f:
-        f.write(format_as_text(subject_transcript))
+        # Save transcripts
+        with open(partner_json_path, "w", encoding="utf-8") as f:
+            json.dump(partner_transcript, f, indent=2, ensure_ascii=False)
+        with open(tape_output / "partner_transcript.txt", "w", encoding="utf-8") as f:
+            f.write(format_as_text(partner_transcript))
+
+        with open(subject_json_path, "w", encoding="utf-8") as f:
+            json.dump(subject_transcript, f, indent=2, ensure_ascii=False)
+        with open(tape_output / "subject_transcript.txt", "w", encoding="utf-8") as f:
+            f.write(format_as_text(subject_transcript))
 
     # Step 5: De-identify
-    logger.info("Step 5: De-identifying transcripts (joint session)...")
-    t0 = time.time()
-    mapper = DeidMapper()
-    partner_deid, subject_deid = deid_session(
-        [partner_transcript, subject_transcript], classifier, mapper
-    )
-    timings["deid_s"] = round(time.time() - t0, 1)
-
     deid_dir = tape_output / "deid"
     deid_dir.mkdir(parents=True, exist_ok=True)
+    partner_deid_path = deid_dir / "partner_deid.json"
+    subject_deid_path = deid_dir / "subject_deid.json"
+    mapping_path = deid_dir / "deid_mapping.json"
+    use_cached_deid = (
+        use_cached_transcripts
+        and partner_deid_path.exists()
+        and subject_deid_path.exists()
+        and mapping_path.exists()
+    )
+    if use_cached_deid:
+        logger.info("Step 5: Loading cached de-identified transcripts")
+        timings["deid_s"] = 0.0
+    else:
+        logger.info("Step 5: De-identifying transcripts (joint session)...")
+        t0 = time.time()
+        mapper = DeidMapper()
+        partner_deid, subject_deid = deid_session(
+            [partner_transcript, subject_transcript], classifier, mapper
+        )
+        timings["deid_s"] = round(time.time() - t0, 1)
 
-    with open(deid_dir / "partner_deid.json", "w", encoding="utf-8") as f:
-        json.dump(partner_deid, f, indent=2, ensure_ascii=False)
-    with open(deid_dir / "partner_deid.txt", "w", encoding="utf-8") as f:
-        f.write(partner_deid["text"])
+        with open(partner_deid_path, "w", encoding="utf-8") as f:
+            json.dump(partner_deid, f, indent=2, ensure_ascii=False)
+        with open(deid_dir / "partner_deid.txt", "w", encoding="utf-8") as f:
+            f.write(partner_deid["text"])
 
-    with open(deid_dir / "subject_deid.json", "w", encoding="utf-8") as f:
-        json.dump(subject_deid, f, indent=2, ensure_ascii=False)
-    with open(deid_dir / "subject_deid.txt", "w", encoding="utf-8") as f:
-        f.write(subject_deid["text"])
+        with open(subject_deid_path, "w", encoding="utf-8") as f:
+            json.dump(subject_deid, f, indent=2, ensure_ascii=False)
+        with open(deid_dir / "subject_deid.txt", "w", encoding="utf-8") as f:
+            f.write(subject_deid["text"])
 
-    with open(deid_dir / "deid_mapping.json", "w", encoding="utf-8") as f:
-        json.dump(mapper.get_mapping(), f, indent=2, ensure_ascii=False)
+        with open(mapping_path, "w", encoding="utf-8") as f:
+            json.dump(mapper.get_mapping(), f, indent=2, ensure_ascii=False)
 
     # Step 6: Generate HTML viewer
-    logger.info("Step 6: Generating HTML viewer...")
-    t0 = time.time()
-    html = generate_html(tape_output)
-    (tape_output / "view.html").write_text(html)
-    timings["viewer_s"] = round(time.time() - t0, 1)
+    view_path = tape_output / "view.html"
+    if view_path.exists() and use_cached_deid:
+        logger.info("Step 6: Using cached HTML viewer")
+        timings["viewer_s"] = 0.0
+    else:
+        logger.info("Step 6: Generating HTML viewer...")
+        t0 = time.time()
+        html = generate_html(tape_output)
+        view_path.write_text(html)
+        timings["viewer_s"] = round(time.time() - t0, 1)
 
     timings["total_s"] = round(time.time() - tape_start, 1)
     logger.info(
@@ -325,6 +408,14 @@ def cli():
         "--skip-existing", action="store_true",
         help="Skip tapes that already have a view.html (fully processed)",
     )
+    parser.add_argument(
+        "--vad-chunked-transcription", action="store_true",
+        help="Use speech-aware short chunks for the initial stitched transcription",
+    )
+    parser.add_argument(
+        "--stop-after-transcription", action="store_true",
+        help="Stop after writing full_transcript.json",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -346,21 +437,27 @@ def cli():
         if not mp3_files:
             raise ValueError(f"No .mp3 files found in {input_dir}")
 
-    logger.info("Loading de-identification model...")
-    t0 = time.time()
-    classifier = load_classifier()
-    logger.info(f"Deid model loaded in {round(time.time() - t0, 1)}s")
+    if args.skip_existing:
+        original_count = len(mp3_files)
+        mp3_files = [
+            path for path in mp3_files
+            if not (output_dir / path.stem / "view.html").exists()
+        ]
+        skipped_count = original_count - len(mp3_files)
+        if skipped_count:
+            logger.info(f"Skipping {skipped_count} already-complete tape(s)")
+
+    classifier = None
+    if mp3_files and not args.stop_after_transcription:
+        logger.info("Loading de-identification model...")
+        t0 = time.time()
+        classifier = load_classifier()
+        logger.info(f"Deid model loaded in {round(time.time() - t0, 1)}s")
 
     all_timings = []
     run_start = time.time()
 
     for audio_path in mp3_files:
-        if args.skip_existing:
-            existing = output_dir / audio_path.stem / "view.html"
-            if existing.exists():
-                logger.info(f"Skipping (already complete): {audio_path.stem}")
-                continue
-
         try:
             timings = process_stitched(
                 audio_path, output_dir,
@@ -368,6 +465,8 @@ def cli():
                 model_size=args.model_size,
                 language=args.language,
                 ollama_model=args.ollama_model,
+                vad_chunked_transcription=args.vad_chunked_transcription,
+                stop_after_transcription=args.stop_after_transcription,
             )
             all_timings.append(timings)
         except Exception as e:
@@ -385,8 +484,8 @@ def cli():
     for t in all_timings:
         logger.info(
             f"{t['tape']:<45} {t['transcribe_s']:>4.0f}s "
-            f"{t['split_detect_s']:>5.0f}s {t['diarize_s']:>4.0f}s "
-            f"{t['deid_s']:>4.0f}s {t['total_s']:>5.0f}s"
+            f"{t.get('split_detect_s', 0):>5.0f}s {t.get('diarize_s', 0):>4.0f}s "
+            f"{t.get('deid_s', 0):>4.0f}s {t.get('total_s', t['transcribe_s']):>5.0f}s"
         )
 
 

@@ -17,10 +17,12 @@ import argparse
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 import librosa
 import numpy as np
+import soundfile as sf
 import torch
 from dotenv import load_dotenv
 from pyannote.audio import Pipeline
@@ -147,6 +149,125 @@ def transcribe_full_audio(
         })
     logger.info(f"Whisper produced {len(result)} segments")
     return result
+
+
+def _merge_vad_intervals(
+    intervals: np.ndarray,
+    max_gap_samples: int,
+    min_duration_samples: int,
+) -> list[tuple[int, int]]:
+    """Merge nearby non-silent spans and drop tiny clicks/noise bursts."""
+    if len(intervals) == 0:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    cur_start, cur_end = int(intervals[0][0]), int(intervals[0][1])
+    for start, end in intervals[1:]:
+        start, end = int(start), int(end)
+        if start - cur_end <= max_gap_samples:
+            cur_end = max(cur_end, end)
+        else:
+            if cur_end - cur_start >= min_duration_samples:
+                merged.append((cur_start, cur_end))
+            cur_start, cur_end = start, end
+
+    if cur_end - cur_start >= min_duration_samples:
+        merged.append((cur_start, cur_end))
+
+    return merged
+
+
+def _split_interval(
+    start: int,
+    end: int,
+    max_duration_samples: int,
+) -> list[tuple[int, int]]:
+    chunks = []
+    cursor = start
+    while cursor < end:
+        chunk_end = min(end, cursor + max_duration_samples)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+    return chunks
+
+
+def transcribe_vad_chunks(
+    audio_path: Path,
+    model: WhisperModel,
+    language: str = "en",
+    top_db: int = 28,
+    max_chunk_seconds: float = 25.0,
+    merge_gap_seconds: float = 0.6,
+    min_chunk_seconds: float = 0.35,
+    pad_seconds: float = 0.15,
+) -> list[dict]:
+    """Transcribe short non-silent chunks to reduce long-context repetition."""
+    logger.info(
+        "Transcribing with VAD chunks: top_db=%s, max_chunk=%.1fs",
+        top_db,
+        max_chunk_seconds,
+    )
+    audio, _ = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
+    intervals = librosa.effects.split(
+        audio,
+        top_db=top_db,
+        frame_length=2048,
+        hop_length=512,
+    )
+
+    merged = _merge_vad_intervals(
+        intervals,
+        max_gap_samples=int(merge_gap_seconds * SAMPLE_RATE),
+        min_duration_samples=int(min_chunk_seconds * SAMPLE_RATE),
+    )
+    max_chunk_samples = int(max_chunk_seconds * SAMPLE_RATE)
+    chunk_intervals = [
+        piece
+        for start, end in merged
+        for piece in _split_interval(start, end, max_chunk_samples)
+    ]
+    logger.info(
+        "VAD found %s speech spans, split into %s chunks",
+        len(merged),
+        len(chunk_intervals),
+    )
+
+    if not chunk_intervals:
+        logger.warning("VAD found no speech; falling back to full-audio transcription")
+        return transcribe_full_audio(audio_path, model, language)
+
+    results = []
+    pad_samples = int(pad_seconds * SAMPLE_RATE)
+    audio_len = len(audio)
+
+    with tempfile.TemporaryDirectory(prefix="washu_vad_chunks_") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        for idx, (start, end) in enumerate(chunk_intervals, start=1):
+            padded_start = max(0, start - pad_samples)
+            padded_end = min(audio_len, end + pad_samples)
+            chunk_audio = audio[padded_start:padded_end]
+            chunk_path = tmp_path / f"chunk_{idx:04d}.wav"
+            sf.write(chunk_path, chunk_audio, SAMPLE_RATE)
+
+            offset = padded_start / SAMPLE_RATE
+            segments = model.transcribe(str(chunk_path), language=language)
+            for seg in segments:
+                text = seg.text.strip()
+                if not text:
+                    continue
+                seg_start = round(offset + seg.t0 / 100.0, 3)
+                seg_end = round(offset + seg.t1 / 100.0, 3)
+                if seg_end <= start / SAMPLE_RATE or seg_start >= end / SAMPLE_RATE:
+                    continue
+                results.append({
+                    "start": seg_start,
+                    "end": seg_end,
+                    "text": text,
+                })
+
+    results.sort(key=lambda item: (item["start"], item["end"]))
+    logger.info(f"Whisper produced {len(results)} VAD-chunked segments")
+    return results
 
 
 def align_segments_to_speakers(
