@@ -38,7 +38,7 @@ class MemoryScores(BaseModel):
         return v
 
 
-OrientationValue = Literal["correct", "incorrect", "not_given"]
+OrientationValue = Literal["correct", "incorrect", "not_given", "ground_truth_missing"]
 
 
 class OrientationScores(BaseModel):
@@ -88,6 +88,7 @@ For each component (year, month, day), determine:
 - "correct" — the subject stated this component and it matches the actual interview date
 - "incorrect" — the subject stated this component but it does NOT match the actual interview date
 - "not_given" — the subject did not provide this component at all
+- "ground_truth_missing" — the interview date does not contain enough information to verify this component
 
 The interview date is in MM-DD-YYYY format. The subject may express the date in any \
 natural language form (e.g., "December" for month 12, "Monday" is NOT a day-of-month).
@@ -103,8 +104,8 @@ END OF TRANSCRIPT.
 
 
 def _parse_date_header(first_line: str) -> str | None:
-    """Extract date from the [date] MM-DD-YYYY [date] header line."""
-    match = re.match(r"\[date\]\s*(\d{1,2}-\d{1,2}-\d{4})\s*\[date\]", first_line.strip())
+    """Extract date from the [date] M-D-YY or M-D-YYYY [date] header line."""
+    match = re.match(r"\[date\]\s*(\d{1,2}-\d{1,2}-\d{2,4})\s*\[date\]", first_line.strip())
     if match:
         return match.group(1)
     return None
@@ -140,9 +141,9 @@ def score_orientation(
 ) -> OrientationScores:
     """Score date orientation from the subject transcript."""
     schema_example = json.dumps({
-        "year": "correct | incorrect | not_given",
-        "month": "correct | incorrect | not_given",
-        "day": "correct | incorrect | not_given",
+        "year": "correct | incorrect | not_given | ground_truth_missing",
+        "month": "correct | incorrect | not_given | ground_truth_missing",
+        "day": "correct | incorrect | not_given | ground_truth_missing",
     }, indent=2)
 
     prompt = ORIENTATION_PROMPT.format(
@@ -194,21 +195,18 @@ def score_transcript(
     logger.info("Scoring memory (registration + recall)...")
     memory = score_memory(transcript_body, model)
 
-    # Agent 2: Date orientation (only if date is available)
-    orientation = None
+    # Agent 2: Date orientation
     if interview_date:
         logger.info(f"Scoring orientation (interview date: {interview_date})...")
         orientation = score_orientation(transcript_body, interview_date, model)
     else:
-        logger.warning("No [date] header found — skipping orientation scoring")
+        logger.info("No [date] header found — scoring orientation with unknown ground truth")
+        orientation = score_orientation(transcript_body, "UNKNOWN", model)
 
-    results = {
+    return {
         "memory": memory.model_dump(),
+        "orientation": orientation.model_dump(),
     }
-    if orientation:
-        results["orientation"] = orientation.model_dump()
-
-    return results
 
 
 def cli():

@@ -18,6 +18,8 @@ import argparse
 import gc
 import json
 import logging
+import re
+import shutil
 import time
 from pathlib import Path
 
@@ -50,6 +52,19 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M",
 )
 logger = logging.getLogger(__name__)
+
+
+def _extract_date_from_filename(filename: str) -> str | None:
+    """Extract a trailing date (M-D-YY or M-D-YYYY) from a filename stem.
+
+    Expects the date as the last dash-separated numeric components, e.g.:
+      Tape_11_Interview_(Source)_1_12-21-24  -> 12-21-24
+      SomeFile_9-19-2023                     -> 9-19-2023
+    """
+    match = re.search(r"(\d{1,2}-\d{1,2}-\d{2,4})$", filename)
+    if match:
+        return match.group(1)
+    return None
 
 
 def _partition_segments(
@@ -122,6 +137,7 @@ def process_stitched(
     ollama_model: str = OLLAMA_MODEL,
     vad_chunked_transcription: bool = False,
     stop_after_transcription: bool = False,
+    deid_output_dir: Path | None = None,
 ) -> dict:
     """Process a single stitched recording through the full pipeline."""
     tape_name = audio_path.stem
@@ -304,15 +320,18 @@ def process_stitched(
         )
 
         # Save transcripts
+        interview_date = _extract_date_from_filename(tape_name)
+        date_header = f"[date] {interview_date} [date]\n" if interview_date else ""
+
         with open(partner_json_path, "w", encoding="utf-8") as f:
             json.dump(partner_transcript, f, indent=2, ensure_ascii=False)
         with open(tape_output / "partner_transcript.txt", "w", encoding="utf-8") as f:
-            f.write(format_as_text(partner_transcript))
+            f.write(date_header + format_as_text(partner_transcript))
 
         with open(subject_json_path, "w", encoding="utf-8") as f:
             json.dump(subject_transcript, f, indent=2, ensure_ascii=False)
         with open(tape_output / "subject_transcript.txt", "w", encoding="utf-8") as f:
-            f.write(format_as_text(subject_transcript))
+            f.write(date_header + format_as_text(subject_transcript))
 
     # Step 5: Score transcript (Ollama)
     scores_path = tape_output / "scores.json"
@@ -326,6 +345,12 @@ def process_stitched(
         timings["score_s"] = round(time.time() - t0, 1)
         with open(scores_path, "w", encoding="utf-8") as f:
             json.dump(scores, f, indent=2, ensure_ascii=False)
+
+    # Copy scores.json to deid_output if configured
+    if deid_output_dir is not None:
+        tape_deid_output = deid_output_dir / tape_name
+        tape_deid_output.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(scores_path, tape_deid_output / "scores.json")
 
     # Step 6: De-identify
     deid_dir = tape_output / "deid"
@@ -342,6 +367,16 @@ def process_stitched(
     if use_cached_deid:
         logger.info("Step 6: Loading cached de-identified transcripts")
         timings["deid_s"] = 0.0
+        # Ensure deid_output has copies even when using cache
+        if deid_output_dir is not None:
+            tape_deid_output = deid_output_dir / tape_name
+            tape_deid_output.mkdir(parents=True, exist_ok=True)
+            partner_deid_txt = deid_dir / "partner_deid.txt"
+            subject_deid_txt = deid_dir / "subject_deid.txt"
+            if partner_deid_txt.exists():
+                shutil.copy2(partner_deid_txt, tape_deid_output / "partner_deid.txt")
+            if subject_deid_txt.exists():
+                shutil.copy2(subject_deid_txt, tape_deid_output / "subject_deid.txt")
     else:
         logger.info("Step 6: De-identifying transcripts (joint session)...")
         t0 = time.time()
@@ -363,6 +398,13 @@ def process_stitched(
 
         with open(mapping_path, "w", encoding="utf-8") as f:
             json.dump(mapper.get_mapping(), f, indent=2, ensure_ascii=False)
+
+        # Copy deid .txt files to deid_output if configured
+        if deid_output_dir is not None:
+            tape_deid_output = deid_output_dir / tape_name
+            tape_deid_output.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(deid_dir / "partner_deid.txt", tape_deid_output / "partner_deid.txt")
+            shutil.copy2(deid_dir / "subject_deid.txt", tape_deid_output / "subject_deid.txt")
 
     # Step 7: Generate HTML viewer
     view_path = tape_output / "view.html"
@@ -393,12 +435,16 @@ def cli():
         description="Transcribe and de-identify stitched WashU CDR recordings"
     )
     parser.add_argument(
-        "--input", required=True,
-        help="Folder containing .mp3 files (stitched partner+subject recordings)",
+        "--input", default="../interview_data",
+        help="Folder containing .mp3 files (default: ../interview_data)",
     )
     parser.add_argument(
-        "--output", default="output",
-        help="Output directory (default: output/)",
+        "--output", default="../output_to_be_removed",
+        help="Output directory (default: ../output_to_be_removed)",
+    )
+    parser.add_argument(
+        "--deid-output", default="deid_output",
+        help="Directory for deliverable deid files: partner_deid.txt, subject_deid.txt, scores.json (default: deid_output/)",
     )
     parser.add_argument(
         "--tape", default=None,
@@ -438,6 +484,7 @@ def cli():
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
+    deid_output_dir = Path(args.deid_output)
 
     if not input_dir.exists():
         raise FileNotFoundError(f"Input folder not found: {input_dir}")
@@ -481,6 +528,7 @@ def cli():
                 ollama_model=args.ollama_model,
                 vad_chunked_transcription=args.vad_chunked_transcription,
                 stop_after_transcription=args.stop_after_transcription,
+                deid_output_dir=deid_output_dir,
             )
             all_timings.append(timings)
         except Exception as e:

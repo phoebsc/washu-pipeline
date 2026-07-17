@@ -23,7 +23,10 @@ timestamped segments (no speaker labels yet)
 split_timestamp_seconds
     ↓  transcribe.py — diarize each half (pyannote, num_speakers=2)
     ↓  align whisper segments to speaker turns by timestamp overlap (no merge)
-partner_transcript.json + subject_transcript.json
+    ↓  extract interview date from filename, prepend [date] header to .txt outputs
+partner_transcript.json + subject_transcript.json + .txt (with date header)
+    ↓  ollama_score.py — score memory + orientation (Gemma 4 31B via Ollama)
+scores.json
     ↓  deid.py (openai/privacy-filter local model + propagation)
 deid/ (coded transcripts + deid_mapping.json)
 ```
@@ -64,6 +67,7 @@ deid/ (coded transcripts + deid_mapping.json)
 | `washu-run` | `run_pipeline.py` | Timestamp-split workflow (legacy) |
 | `washu-split` | `split_audio.py` | Split audio at timestamp into partner/subject |
 | `washu-transcribe` | `transcribe.py` | Whisper.cpp + pyannote transcription |
+| `washu-score` | `ollama_score.py` | Score memory + orientation from subject transcript |
 | `washu-deid` | `deid.py` | Local model de-identification with coded entities |
 | `washu-deid-editor` | `deid_editor.py` | Local webpage for reviewing/editing de-id entities |
 
@@ -73,6 +77,19 @@ Desktop launcher:
 ```
 
 The de-id editor opens a local webpage for `output/` with a dyad dropdown. Users can click highlighted entities to remove them, or select/type exact text and choose an entity type to add new entities. The checkbox applies add/remove to every exact same text/type match across both partner and subject transcripts. Every add/remove action autosaves immediately, rewriting `output/<dyad_id>/deid/{partner_deid.json,subject_deid.json,partner_deid.txt,subject_deid.txt,deid_mapping.json}` and refreshing `output/<dyad_id>/view.html`.
+
+---
+
+## Scoring & Date Extraction
+
+The pipeline scores three clinical items from the subject interview using the local LLM:
+1. **Memory registration** — immediate repetition of a name+address
+2. **Memory recall** — delayed recall of the same name+address
+3. **Date orientation** — year, month, day correctness vs. ground truth
+
+**Date extraction from filenames:** Production filenames end with the interview date in `M-D-YY` or `M-D-YYYY` format (e.g. `Tape_11_Interview_(Source)_1_12-21-24`). The pipeline extracts this trailing date and prepends a `[date] 12-21-24 [date]` header line to both `partner_transcript.txt` and `subject_transcript.txt`.
+
+**Scoring behavior:** The scoring step always runs orientation scoring. If a date header is present, it provides the ground truth to the LLM. If no date is extractable from the filename (no header written), the LLM is called with `"UNKNOWN"` as the interview date, so it returns `"ground_truth_missing"` for all orientation components.
 
 ---
 

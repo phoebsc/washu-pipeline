@@ -203,7 +203,7 @@ def load_dyad(output_root: Path, dyad_id: str) -> dict:
     }
 
 
-def save_dyad(output_root: Path, payload: dict) -> dict:
+def save_dyad(output_root: Path, payload: dict, deid_output_root: Path | None = None) -> dict:
     dyad_dir = _safe_dyad_dir(output_root, str(payload.get("id", "")))
     deid_dir = dyad_dir / "deid"
 
@@ -243,6 +243,13 @@ def save_dyad(output_root: Path, payload: dict) -> dict:
     (deid_dir / "subject_deid.txt").write_text(subject_deid["text"], encoding="utf-8")
     (dyad_dir / "view.html").write_text(generate_html(dyad_dir), encoding="utf-8")
 
+    # Also update deid_output if configured
+    if deid_output_root is not None:
+        dyad_deid_output = deid_output_root / dyad_dir.name
+        dyad_deid_output.mkdir(parents=True, exist_ok=True)
+        (dyad_deid_output / "partner_deid.txt").write_text(partner_deid["text"], encoding="utf-8")
+        (dyad_deid_output / "subject_deid.txt").write_text(subject_deid["text"], encoding="utf-8")
+
     return {
         "ok": True,
         "saved": str(deid_dir),
@@ -269,7 +276,7 @@ def _text_response(handler: BaseHTTPRequestHandler, body: str, status: int = 200
     handler.wfile.write(encoded)
 
 
-def make_handler(output_root: Path):
+def make_handler(output_root: Path, deid_output_root: Path | None = None):
     class DeidEditorHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args) -> None:
             logger.info(fmt, *args)
@@ -298,7 +305,7 @@ def make_handler(output_root: Path):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
-                _json_response(self, save_dyad(output_root, payload))
+                _json_response(self, save_dyad(output_root, payload, deid_output_root))
             except Exception as exc:
                 _json_response(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
@@ -318,8 +325,13 @@ def cli() -> None:
     parser = argparse.ArgumentParser(description="Open a local editor for de-id results")
     parser.add_argument(
         "--output",
-        default="output",
-        help="Output folder containing dyad subfolders (default: output)",
+        default="../output_to_be_removed",
+        help="Output folder containing dyad subfolders (default: ../output_to_be_removed)",
+    )
+    parser.add_argument(
+        "--deid-output",
+        default="deid_output",
+        help="Directory for deliverable deid files (default: deid_output/)",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -330,11 +342,14 @@ def cli() -> None:
     if not output_root.exists():
         raise FileNotFoundError(f"Output folder not found: {output_root}")
 
+    deid_output_root = Path(args.deid_output).expanduser().resolve()
+
     port = _free_port(args.port)
-    server = ThreadingHTTPServer((args.host, port), make_handler(output_root))
+    server = ThreadingHTTPServer((args.host, port), make_handler(output_root, deid_output_root))
     url = f"http://{args.host}:{port}"
     logger.info(f"WashU de-id editor running at {url}")
     logger.info(f"Reading and saving dyads under {output_root}")
+    logger.info(f"Deid deliverables synced to {deid_output_root}")
     if not args.no_browser:
         webbrowser.open(url)
     server.serve_forever()

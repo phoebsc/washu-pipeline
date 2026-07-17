@@ -16,26 +16,44 @@ Processes historical CDR interview recordings from WashU. Audio files contain tw
 ## Pipeline (primary — stitched audio)
 
 ```
-.mp3 (stitched: partner interview + subject interview)
+../interview_data/*.mp3 (stitched: partner interview + subject interview)
     ↓  transcribe.py — transcribe full audio (whisper.cpp Metal, large-v3-turbo + VAD chunks)
 timestamped segments (no speaker labels yet)
     ↓  ollama_split.py — detect split point (Gemma 4 31B via Ollama)
 split_timestamp_seconds
     ↓  transcribe.py — diarize each half (pyannote, num_speakers=2)
     ↓  align whisper segments to speaker turns by timestamp overlap (no merge)
-partner_transcript.json + subject_transcript.json
+    ↓  extract interview date from filename, prepend [date] header to .txt outputs
+partner_transcript.json + subject_transcript.json + .txt (with date header)  → ../output_to_be_removed/<tape>/
+    ↓  ollama_score.py — score memory + orientation (Gemma 4 31B via Ollama)
+scores.json                                                                  → ../output_to_be_removed/<tape>/ + deid_output/<tape>/
     ↓  deid.py (openai/privacy-filter local model + propagation)
-deid/ (coded transcripts + deid_mapping.json)
+deid/ (coded transcripts + deid_mapping.json)                                → ../output_to_be_removed/<tape>/deid/
+partner_deid.txt + subject_deid.txt                                          → deid_output/<tape>/
 ```
 
-Recommended stitched command:
+**Directory layout:**
+```
+~/GitHub/
+├── interview_data/              ← audio input (.mp3 files)
+├── output_to_be_removed/        ← full pipeline outputs (per-tape subfolders, disposable)
+│   └── <tape_name>/            ← transcripts, split_info, deid/, view.html
+└── washu_pipeline/              ← this repo
+    └── deid_output/             ← deliverables only (partner_deid.txt, subject_deid.txt, scores.json)
+        └── <tape_name>/
+```
+
+Recommended stitched command (run from the washu_pipeline/ directory):
 ```bash
 uv run washu-run-stitched \
-  --input /Users/fadchen/Desktop/interview_data \
-  --output /Users/fadchen/Desktop/washu_pipeline/output \
   --model-size large-v3-turbo \
   --vad-chunked-transcription
 ```
+
+Defaults (relative to CWD = washu_pipeline/):
+- `--input ../interview_data` — audio .mp3 files
+- `--output ../output_to_be_removed` — full pipeline outputs (transcripts, split_info, deid/, view.html)
+- `--deid-output deid_output` — deliverables inside washu_pipeline (partner_deid.txt, subject_deid.txt, scores.json)
 
 VAD chunking detects the non-silent parts of the recording and transcribes them as short chunks instead of asking Whisper to process the entire tape as one long context. This keeps timestamps in the original audio timeline, but reduces the chance that quiet/noisy regions make Whisper hallucinate repeated phrases such as “The End” or looping filler.
 
@@ -64,6 +82,7 @@ deid/ (coded transcripts + deid_mapping.json)
 | `washu-run` | `run_pipeline.py` | Timestamp-split workflow (legacy) |
 | `washu-split` | `split_audio.py` | Split audio at timestamp into partner/subject |
 | `washu-transcribe` | `transcribe.py` | Whisper.cpp + pyannote transcription |
+| `washu-score` | `ollama_score.py` | Score memory + orientation from subject transcript |
 | `washu-deid` | `deid.py` | Local model de-identification with coded entities |
 | `washu-deid-editor` | `deid_editor.py` | Local webpage for reviewing/editing de-id entities |
 
@@ -72,7 +91,20 @@ Desktop launcher:
 /Users/fadchen/Desktop/Open\ WashU\ Deid\ Editor.command
 ```
 
-The de-id editor opens a local webpage for `output/` with a dyad dropdown. Users can click highlighted entities to remove them, or select/type exact text and choose an entity type to add new entities. The checkbox applies add/remove to every exact same text/type match across both partner and subject transcripts. Every add/remove action autosaves immediately, rewriting `output/<dyad_id>/deid/{partner_deid.json,subject_deid.json,partner_deid.txt,subject_deid.txt,deid_mapping.json}` and refreshing `output/<dyad_id>/view.html`.
+The de-id editor opens a local webpage for `../output_to_be_removed/` with a dyad dropdown. Users can click highlighted entities to remove them, or select/type exact text and choose an entity type to add new entities. The checkbox applies add/remove to every exact same text/type match across both partner and subject transcripts. Every add/remove action autosaves immediately, rewriting `../output_to_be_removed/<dyad_id>/deid/{partner_deid.json,subject_deid.json,partner_deid.txt,subject_deid.txt,deid_mapping.json}`, refreshing `../output_to_be_removed/<dyad_id>/view.html`, and syncing `partner_deid.txt`/`subject_deid.txt` to `deid_output/<dyad_id>/`.
+
+---
+
+## Scoring & Date Extraction
+
+The pipeline scores three clinical items from the subject interview using the local LLM:
+1. **Memory registration** — immediate repetition of a name+address
+2. **Memory recall** — delayed recall of the same name+address
+3. **Date orientation** — year, month, day correctness vs. ground truth
+
+**Date extraction from filenames:** Production filenames end with the interview date in `M-D-YY` or `M-D-YYYY` format (e.g. `Tape_11_Interview_(Source)_1_12-21-24`). The pipeline extracts this trailing date and prepends a `[date] 12-21-24 [date]` header line to both `partner_transcript.txt` and `subject_transcript.txt`.
+
+**Scoring behavior:** The scoring step always runs orientation scoring. If a date header is present, it provides the ground truth to the LLM. If no date is extractable from the filename (no header written), the LLM is called with `"UNKNOWN"` as the interview date, so it returns `"ground_truth_missing"` for all orientation components.
 
 ---
 
@@ -107,7 +139,7 @@ No Azure/OpenAI keys needed — pipeline is fully local after model downloads.
 
 1. All scripts run with `uv run` from the project root
 2. The `deid_mapping.json` is sensitive — never commit it with real data
-3. Audio files and output/ are gitignored
+3. Audio files, output/, and deid_output/ are gitignored
 4. Speaker labels are interviewer/participant (not agent/participant)
 5. Partner and subject transcripts share a single DeidMapper for consistent entity codes
 6. Stitched transcription should use `large-v3-turbo` with `--vad-chunked-transcription`

@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 output/
+deid_output/
 *.egg-info/
 dist/
 build/
