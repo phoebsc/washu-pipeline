@@ -8,3 +8,5 @@ deid_output/
 dist/
 build/
 .uv/
+.DS_Store
+.DS_Store.local-backup
