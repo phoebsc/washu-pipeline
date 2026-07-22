@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from .ollama_split import call_ollama, check_ollama_available, OLLAMA_MODEL
 
@@ -25,23 +25,32 @@ logger = logging.getLogger(__name__)
 
 # --- Pydantic models for LLM output validation ---
 
-class MemoryScores(BaseModel):
-    target_phrase: str
-    registration: list[int]
-    recall: list[int]
+BinaryScore = Literal[0, 1]
 
-    @field_validator("registration", "recall")
-    @classmethod
-    def validate_binary(cls, v: list[int]) -> list[int]:
-        if not all(x in (0, 1) for x in v):
-            raise ValueError("All values must be 0 or 1")
-        return v
+
+class MemoryScores(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_phrase: str = Field(
+        max_length=200,
+        description="The exact name and address the interviewer asked the subject to remember."
+    )
+    registration: list[BinaryScore] = Field(
+        max_length=10,
+        description="One 0-or-1 correctness score per immediate repetition attempt; not timestamps."
+    )
+    recall: list[BinaryScore] = Field(
+        max_length=10,
+        description="One 0-or-1 correctness score per delayed recall attempt; not timestamps."
+    )
 
 
 OrientationValue = Literal["correct", "incorrect", "not_given", "ground_truth_missing"]
 
 
 class OrientationScores(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     year: OrientationValue
     month: OrientationValue
     day: OrientationValue
@@ -124,16 +133,13 @@ def score_memory(transcript_text: str, model: str = OLLAMA_MODEL) -> MemoryScore
         transcript=transcript_text,
     )
 
-    response_text = call_ollama(prompt, model)
-
-    try:
-        raw = json.loads(response_text)
-    except json.JSONDecodeError:
-        raise RuntimeError(
-            f"Ollama returned unparseable JSON for memory scoring. Raw:\n{response_text[:500]}"
-        )
-
-    return MemoryScores.model_validate(raw)
+    response_text = call_ollama(
+        prompt,
+        model,
+        task_name="memory scoring",
+        response_format=MemoryScores.model_json_schema(),
+    )
+    return MemoryScores.model_validate(json.loads(response_text))
 
 
 def score_orientation(
@@ -152,16 +158,13 @@ def score_orientation(
         transcript=transcript_text,
     )
 
-    response_text = call_ollama(prompt, model)
-
-    try:
-        raw = json.loads(response_text)
-    except json.JSONDecodeError:
-        raise RuntimeError(
-            f"Ollama returned unparseable JSON for orientation scoring. Raw:\n{response_text[:500]}"
-        )
-
-    return OrientationScores.model_validate(raw)
+    response_text = call_ollama(
+        prompt,
+        model,
+        task_name="orientation scoring",
+        response_format=OrientationScores.model_json_schema(),
+    )
+    return OrientationScores.model_validate(json.loads(response_text))
 
 
 def score_transcript(

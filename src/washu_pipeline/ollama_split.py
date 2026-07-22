@@ -74,7 +74,12 @@ def check_ollama_available(model: str = OLLAMA_MODEL) -> bool:
         return False
 
 
-def call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
+def call_ollama(
+    prompt: str,
+    model: str = OLLAMA_MODEL,
+    task_name: str = "split-point detection",
+    response_format: str | dict = "json",
+) -> str:
     """Call Ollama generate API. Returns the response text."""
     prompt_chars = len(prompt)
     estimated_tokens = prompt_chars // 3
@@ -85,7 +90,7 @@ def call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "format": "json",
+        "format": response_format,
         "options": {
             "temperature": 0.1,
             "num_ctx": num_ctx,
@@ -98,7 +103,7 @@ def call_ollama(prompt: str, model: str = OLLAMA_MODEL) -> str:
         headers={"Content-Type": "application/json"},
     )
 
-    logger.info(f"Calling Ollama ({model}) for split-point detection...")
+    logger.info(f"Calling Ollama ({model}) for {task_name}...")
     with urllib.request.urlopen(req, timeout=1800) as resp:
         result = json.loads(resp.read())
         response = result["response"]
