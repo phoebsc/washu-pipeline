@@ -341,13 +341,18 @@ def process_stitched(
     else:
         logger.info("Step 5: Scoring transcript with LLM...")
         t0 = time.time()
-        scores = score_transcript(tape_output, model=ollama_model)
-        timings["score_s"] = round(time.time() - t0, 1)
-        with open(scores_path, "w", encoding="utf-8") as f:
-            json.dump(scores, f, indent=2, ensure_ascii=False)
+        try:
+            scores = score_transcript(tape_output, model=ollama_model)
+            timings["score_s"] = round(time.time() - t0, 1)
+            with open(scores_path, "w", encoding="utf-8") as f:
+                json.dump(scores, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            timings["score_s"] = round(time.time() - t0, 1)
+            logger.error(f"Scoring failed for {tape_name}: {e}")
+            timings["score_failed"] = True
 
     # Copy scores.json to deid_output if configured
-    if deid_output_dir is not None:
+    if deid_output_dir is not None and scores_path.exists():
         tape_deid_output = deid_output_dir / tape_name
         tape_deid_output.mkdir(parents=True, exist_ok=True)
         shutil.copy2(scores_path, tape_deid_output / "scores.json")
@@ -419,11 +424,13 @@ def process_stitched(
         timings["viewer_s"] = round(time.time() - t0, 1)
 
     timings["total_s"] = round(time.time() - tape_start, 1)
+    score_status = "FAIL" if timings.get("score_failed") else f"{timings.get('score_s', 0)}s"
     logger.info(
         f"Done: {tape_name} — "
         f"transcribe={timings['transcribe_s']}s, "
         f"split_detect={timings['split_detect_s']}s, "
         f"diarize={timings['diarize_s']}s, "
+        f"score={score_status}, "
         f"deid={timings['deid_s']}s, "
         f"total={timings['total_s']}s"
     )
@@ -541,13 +548,15 @@ def cli():
     logger.info(f"\n{'=' * 80}")
     logger.info(f"DONE — {len(all_timings)} tapes in {total_run:.0f}s ({total_run/60:.1f}min)")
     logger.info(f"{'=' * 80}")
-    logger.info(f"{'Tape':<45} {'Tx':>5} {'Split':>6} {'Diar':>5} {'Deid':>5} {'Total':>6}")
-    logger.info(f"{'-' * 45} {'-' * 5} {'-' * 6} {'-' * 5} {'-' * 5} {'-' * 6}")
+    logger.info(f"{'Tape':<45} {'Tx':>5} {'Split':>6} {'Diar':>5} {'Score':>6} {'Deid':>5} {'Total':>6}")
+    logger.info(f"{'-' * 45} {'-' * 5} {'-' * 6} {'-' * 5} {'-' * 6} {'-' * 5} {'-' * 6}")
     for t in all_timings:
+        score_col = " FAIL" if t.get("score_failed") else f"{t.get('score_s', 0):>4.0f}s"
         logger.info(
             f"{t['tape']:<45} {t['transcribe_s']:>4.0f}s "
             f"{t.get('split_detect_s', 0):>5.0f}s {t.get('diarize_s', 0):>4.0f}s "
-            f"{t.get('deid_s', 0):>4.0f}s {t.get('total_s', t['transcribe_s']):>5.0f}s"
+            f"{score_col:>5} {t.get('deid_s', 0):>4.0f}s "
+            f"{t.get('total_s', t['transcribe_s']):>5.0f}s"
         )
 
 

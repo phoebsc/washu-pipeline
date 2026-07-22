@@ -9,11 +9,29 @@ import json
 import logging
 import urllib.request
 import urllib.error
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
 OLLAMA_MODEL = "gemma4:31b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
+
+
+class SplitDetectionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    split_timestamp_seconds: float = Field(
+        description="Start time (seconds) of the first utterance belonging to the subject interview."
+    )
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="LLM's self-assessed confidence in the detected split point."
+    )
+    reasoning: str = Field(
+        max_length=500,
+        description="Brief explanation of why this split point was chosen."
+    )
 
 SPLIT_DETECTION_PROMPT_PREFIX = """\
 You are analyzing a transcript of a clinical interview recording.
@@ -152,25 +170,19 @@ def detect_split_point(
     transcript_text = _format_transcript_for_llm(whisper_segments)
     prompt = SPLIT_DETECTION_PROMPT_PREFIX + transcript_text + SPLIT_DETECTION_PROMPT_SUFFIX
 
-    response_text = call_ollama(prompt, model)
+    response_text = call_ollama(
+        prompt,
+        model,
+        task_name="split-point detection",
+        response_format=SplitDetectionResult.model_json_schema(),
+    )
 
-    try:
-        result = json.loads(response_text)
-    except json.JSONDecodeError:
-        raise RuntimeError(
-            f"Ollama returned unparseable response. Raw output:\n{response_text[:500]}"
-        )
+    raw = json.loads(response_text)
+    if "confidence_reasoning" in raw and "reasoning" not in raw:
+        raw["reasoning"] = raw.pop("confidence_reasoning")
 
-    if "confidence_reasoning" in result and "reasoning" not in result:
-        result["reasoning"] = result.pop("confidence_reasoning")
-
-    required_keys = {"split_timestamp_seconds", "confidence", "reasoning"}
-    if not required_keys.issubset(result.keys()):
-        raise RuntimeError(
-            f"Ollama response missing required keys. Got: {list(result.keys())}"
-        )
-
-    split_time = float(result["split_timestamp_seconds"])
+    result = SplitDetectionResult.model_validate(raw)
+    split_time = result.split_timestamp_seconds
 
     min_bound = audio_duration_seconds * 0.10
     max_bound = audio_duration_seconds * 0.90
@@ -181,18 +193,18 @@ def detect_split_point(
             f"Proceeding but flagging as suspicious."
         )
 
-    if result.get("confidence") == "low":
+    if result.confidence == "low":
         logger.warning(
-            f"LLM reported low confidence in split detection: {result['reasoning']}"
+            f"LLM reported low confidence in split detection: {result.reasoning}"
         )
 
     logger.info(
         f"Split detected at {split_time:.1f}s "
-        f"(confidence: {result['confidence']}, reason: {result['reasoning']})"
+        f"(confidence: {result.confidence}, reason: {result.reasoning})"
     )
 
     return {
         "split_timestamp_seconds": split_time,
-        "confidence": result["confidence"],
-        "reasoning": result["reasoning"],
+        "confidence": result.confidence,
+        "reasoning": result.reasoning,
     }
