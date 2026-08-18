@@ -43,6 +43,7 @@ from .transcribe import (
 from .ollama_split import detect_split_point, OLLAMA_MODEL
 from .ollama_score import score_transcript
 from .deid import load_classifier, DeidMapper, deid_session
+from .output_names import deid_output_name
 from .viewer import generate_html
 
 logging.basicConfig(
@@ -141,6 +142,7 @@ def process_stitched(
 ) -> dict:
     """Process a single stitched recording through the full pipeline."""
     tape_name = audio_path.stem
+    tape_deid_output_name = deid_output_name(tape_name)
     tape_output = output_dir / tape_name
     tape_output.mkdir(parents=True, exist_ok=True)
     timings = {"tape": tape_name}
@@ -353,7 +355,7 @@ def process_stitched(
 
     # Copy scores.json to deid_output if configured
     if deid_output_dir is not None and scores_path.exists():
-        tape_deid_output = deid_output_dir / tape_name
+        tape_deid_output = deid_output_dir / tape_deid_output_name
         tape_deid_output.mkdir(parents=True, exist_ok=True)
         shutil.copy2(scores_path, tape_deid_output / "scores.json")
 
@@ -374,7 +376,7 @@ def process_stitched(
         timings["deid_s"] = 0.0
         # Ensure deid_output has copies even when using cache
         if deid_output_dir is not None:
-            tape_deid_output = deid_output_dir / tape_name
+            tape_deid_output = deid_output_dir / tape_deid_output_name
             tape_deid_output.mkdir(parents=True, exist_ok=True)
             partner_deid_txt = deid_dir / "partner_deid.txt"
             subject_deid_txt = deid_dir / "subject_deid.txt"
@@ -406,7 +408,7 @@ def process_stitched(
 
         # Copy deid .txt files to deid_output if configured
         if deid_output_dir is not None:
-            tape_deid_output = deid_output_dir / tape_name
+            tape_deid_output = deid_output_dir / tape_deid_output_name
             tape_deid_output.mkdir(parents=True, exist_ok=True)
             shutil.copy2(deid_dir / "partner_deid.txt", tape_deid_output / "partner_deid.txt")
             shutil.copy2(deid_dir / "subject_deid.txt", tape_deid_output / "subject_deid.txt")

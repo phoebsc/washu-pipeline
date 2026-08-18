@@ -26,10 +26,10 @@ split_timestamp_seconds
     ↓  extract interview date from filename, prepend [date] header to .txt outputs
 partner_transcript.json + subject_transcript.json + .txt (with date header)  → ../output_to_be_removed/<tape>/
     ↓  ollama_score.py — score memory + orientation (Gemma 4 31B via Ollama)
-scores.json                                                                  → ../output_to_be_removed/<tape>/ + deid_output/<tape>/
+scores.json                                                                  → ../output_to_be_removed/<tape>/ + deid_output/<tape_without_date>/
     ↓  deid.py (openai/privacy-filter local model + propagation)
 deid/ (coded transcripts + deid_mapping.json)                                → ../output_to_be_removed/<tape>/deid/
-partner_deid.txt + subject_deid.txt                                          → deid_output/<tape>/
+partner_deid.txt + subject_deid.txt                                          → deid_output/<tape_without_date>/
 ```
 
 **Directory layout:**
@@ -39,8 +39,8 @@ partner_deid.txt + subject_deid.txt                                          →
 ├── output_to_be_removed/        ← full pipeline outputs (per-tape subfolders, disposable)
 │   └── <tape_name>/            ← transcripts, split_info, deid/, view.html
 └── washu_pipeline/              ← this repo
-    └── deid_output/             ← deliverables only (partner_deid.txt, subject_deid.txt, scores.json)
-        └── <tape_name>/
+    └── deid_output/             ← deliverables only; subfolders omit trailing interview dates
+        └── <tape_without_date>/
 ```
 
 Recommended stitched command (run from the washu_pipeline/ directory):
@@ -91,7 +91,7 @@ Desktop launcher:
 /Users/fadchen/Desktop/Open\ WashU\ Deid\ Editor.command
 ```
 
-The de-id editor opens a local webpage for `../output_to_be_removed/` with a dyad dropdown. Users can click highlighted entities to remove them, or select/type exact text and choose an entity type to add new entities. The checkbox applies add/remove to every exact same text/type match across both partner and subject transcripts. Every add/remove action autosaves immediately, rewriting `../output_to_be_removed/<dyad_id>/deid/{partner_deid.json,subject_deid.json,partner_deid.txt,subject_deid.txt,deid_mapping.json}`, refreshing `../output_to_be_removed/<dyad_id>/view.html`, and syncing `partner_deid.txt`/`subject_deid.txt` to `deid_output/<dyad_id>/`.
+The de-id editor opens a local webpage for `../output_to_be_removed/` with a dyad dropdown. Users can click highlighted entities to remove them, or select/type exact text and choose an entity type to add new entities. The checkbox applies add/remove to every exact same text/type match across both partner and subject transcripts. Every add/remove action autosaves immediately, rewriting `../output_to_be_removed/<dyad_id>/deid/{partner_deid.json,subject_deid.json,partner_deid.txt,subject_deid.txt,deid_mapping.json}`, refreshing `../output_to_be_removed/<dyad_id>/view.html`, and syncing `partner_deid.txt`/`subject_deid.txt` to `deid_output/<dyad_id_without_date>/`.
 
 ---
 

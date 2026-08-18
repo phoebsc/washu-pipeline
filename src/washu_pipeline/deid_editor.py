@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from .output_names import deid_output_name
 from .viewer import generate_html
 
 logging.basicConfig(
@@ -245,7 +246,7 @@ def save_dyad(output_root: Path, payload: dict, deid_output_root: Path | None = 
 
     # Also update deid_output if configured
     if deid_output_root is not None:
-        dyad_deid_output = deid_output_root / dyad_dir.name
+        dyad_deid_output = deid_output_root / deid_output_name(dyad_dir.name)
         dyad_deid_output.mkdir(parents=True, exist_ok=True)
         (dyad_deid_output / "partner_deid.txt").write_text(partner_deid["text"], encoding="utf-8")
         (dyad_deid_output / "subject_deid.txt").write_text(subject_deid["text"], encoding="utf-8")
@@ -325,8 +326,8 @@ def cli() -> None:
     parser = argparse.ArgumentParser(description="Open a local editor for de-id results")
     parser.add_argument(
         "--output",
-        default="../output_to_be_removed",
-        help="Output folder containing dyad subfolders (default: ../output_to_be_removed)",
+        default="../output",
+        help="Output folder containing dyad subfolders (default: ../output)",
     )
     parser.add_argument(
         "--deid-output",
@@ -343,6 +344,7 @@ def cli() -> None:
         raise FileNotFoundError(f"Output folder not found: {output_root}")
 
     deid_output_root = Path(args.deid_output).expanduser().resolve()
+    deid_output_root.mkdir(parents=True, exist_ok=True)
 
     port = _free_port(args.port)
     server = ThreadingHTTPServer((args.host, port), make_handler(output_root, deid_output_root))

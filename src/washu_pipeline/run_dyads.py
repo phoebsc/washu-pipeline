@@ -26,6 +26,7 @@ import torch
 
 from .transcribe import transcribe, format_as_text
 from .deid import load_classifier, DeidMapper, deid_session
+from .output_names import deid_output_name
 from .viewer import generate_html_flat
 
 logging.basicConfig(
@@ -48,7 +49,7 @@ def _subject_audio_path(dyad_dir: Path) -> Path:
 
 def _shareable_outputs_exist(output_dir: Path, dyad_id: str) -> bool:
     """Return True when all shareable output files for a dyad are present."""
-    dyad_output = output_dir / dyad_id
+    dyad_output = output_dir / deid_output_name(dyad_id)
     required = (
         "partner_deid.txt",
         "subject_deid.txt",
@@ -158,8 +159,8 @@ def process_dyad(
     (dyad_dir / "view.html").write_text(html)
     timings["viewer_s"] = round(time.time() - t0, 1)
 
-    # Step 4: Write the 4 shareable files to output/<dyad_id>/
-    dyad_output = output_dir / dyad_id
+    # Step 4: Write the 4 shareable files to output/<dyad_id-without-date>/
+    dyad_output = output_dir / deid_output_name(dyad_id)
     dyad_output.mkdir(parents=True, exist_ok=True)
 
     with open(dyad_output / "partner_deid.txt", "w", encoding="utf-8") as f:
