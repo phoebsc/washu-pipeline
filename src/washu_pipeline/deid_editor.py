@@ -14,7 +14,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from .output_names import deid_output_name
 from .viewer import generate_html
 
 logging.basicConfig(
@@ -246,7 +245,7 @@ def save_dyad(output_root: Path, payload: dict, deid_output_root: Path | None = 
 
     # Also update deid_output if configured
     if deid_output_root is not None:
-        dyad_deid_output = deid_output_root / deid_output_name(dyad_dir.name)
+        dyad_deid_output = deid_output_root / dyad_dir.name
         dyad_deid_output.mkdir(parents=True, exist_ok=True)
         (dyad_deid_output / "partner_deid.txt").write_text(partner_deid["text"], encoding="utf-8")
         (dyad_deid_output / "subject_deid.txt").write_text(subject_deid["text"], encoding="utf-8")
